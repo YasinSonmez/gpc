@@ -25,7 +25,9 @@ def simulate_episode(
     exploration_noise_level: float,
     rng: jax.Array,
     strategy: str = "policy",
-) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array, SimulatorState]:
+    num_latent_samples: int = 0,
+    latent_noise_level: float = 1.0,
+) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, SimulatorState]:
     """Starting from a random initial state, run SPC and record training data.
 
     Args:
@@ -37,6 +39,8 @@ def simulate_episode(
         rng: The random number generator key.
         strategy: The strategy for advancing the simulation. "policy" uses the
                   first policy sample, while "best" agregates all samples.
+        num_latent_samples: Number of samples from latent space (0=disabled).
+        latent_noise_level: Noise level for latent sampling.
 
     Returns:
         y: The observations at each time step.
@@ -54,22 +58,46 @@ def simulate_episode(
     # Set the initial sampling-based controller parameters
     psi = ctrl.init_params()
     psi = psi.replace(base_params=psi.base_params.replace(rng=ctrl_rng))
+    
+    # Initialize latent mean for latent sampling (if used)
+    # Must be an array (not None) for JAX scan consistency
+    if num_latent_samples > 0:
+        mean_latent = jnp.zeros((ctrl.num_knots, env.task.model.nu))
+    else:
+        mean_latent = jnp.zeros((0,))  # Empty array instead of None
 
     def _scan_fn(
-        carry: Tuple[SimulatorState, jax.Array, PACParams], t: int
+        carry: Tuple[SimulatorState, jax.Array, PACParams, jax.Array], t: int
     ) -> Tuple:
         """Take simulation step, and record all data."""
-        x, U, psi = carry
+        x, U, psi, mean_latent = carry
 
         # Sample action sequences from the learned policy
-        # TODO: consider warm-starting the policy
         y = env._get_observation(x)
         rng, policy_rng, explore_rng = jax.random.split(psi.base_params.rng, 3)
-        policy_rngs = jax.random.split(policy_rng, ctrl.num_policy_samples)
         warm_start_level = 0.0
-        Us = jax.vmap(policy.apply, in_axes=(0, None, 0, None))(
-            U, y, policy_rngs, warm_start_level
-        )
+        
+        # Check if using latent sampling
+        if num_latent_samples > 0:
+            # Use hybrid sampling: direct + latent
+            from gpc.latent_sampling import hybrid_sample_actions
+            
+            Us, _, latent_info = hybrid_sample_actions(
+                policy, y,
+                num_policy_samples=ctrl.num_policy_samples - num_latent_samples,
+                num_latent_samples=num_latent_samples,
+                noise_level=latent_noise_level,
+                rng=policy_rng,
+                mean_latent=mean_latent,
+                warm_start_level=warm_start_level,
+            )
+        else:
+            # Standard direct policy sampling
+            policy_rngs = jax.random.split(policy_rng, ctrl.num_policy_samples)
+            Us = jax.vmap(policy.apply, in_axes=(0, None, 0, None))(
+                U, y, policy_rngs, warm_start_level
+            )
+            latent_info = None
 
         # Place the samples into the predictive control parameters so they
         # can be used in the predictive control update
@@ -79,24 +107,34 @@ def simulate_episode(
 
         # Update the action sequence with sampling-based predictive control
         psi, rollouts = ctrl.optimize(x.data, psi)
-        U_star = ctrl.get_action_sequence(psi)
+        U_star_knots = psi.mean  # Store the knots, not interpolated trajectory
 
         # Record the lowest costs achieved by SPC and the policy
-        # TODO: consider logging something more informative
         costs = jnp.sum(rollouts.costs, axis=1)
         spc_best_idx = jnp.argmin(costs[: -ctrl.num_policy_samples])
         policy_best_idx = (
-            jnp.argmin(costs[ctrl.num_policy_samples :])
-            + ctrl.num_policy_samples
+            jnp.argmin(costs[-ctrl.num_policy_samples :])
+            + len(costs) - ctrl.num_policy_samples
         )
         spc_best = costs[spc_best_idx]
         policy_best = costs[policy_best_idx]
+        
+        # Update latent mean if using latent sampling
+        if num_latent_samples > 0 and latent_info is not None:
+            from gpc.latent_sampling import update_latent_distribution
+            latent_samples, _ = latent_info
+            # Use only latent sample costs for updating latent distribution
+            latent_costs = costs[-num_latent_samples:]
+            mean_latent = update_latent_distribution(
+                latent_samples, latent_costs, temperature=1.0
+            )
+        # else: mean_latent stays unchanged (no update needed)
 
         # Step the simulation
         if strategy == "policy":
             u = Us[0, 0]
         elif strategy == "best":
-            u = U_star[0]
+            u = ctrl.get_action_sequence(psi)[0]  # Get first interpolated control
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
         exploration_noise = exploration_noise_level * jax.random.normal(
@@ -108,15 +146,15 @@ def simulate_episode(
         # to weigh the flow matching loss in the policy training.
         U_guess = psi.base_params.mean
 
-        return (x, Us, psi), (y, U_star, U_guess, spc_best, policy_best, x)
+        return (x, Us, psi, mean_latent), (y, U_star_knots, U_guess, spc_best, policy_best, x)
 
     rng, u_rng = jax.random.split(rng)
     U = jax.random.normal(
         u_rng,
-        (ctrl.num_policy_samples, env.task.planning_horizon, env.task.model.nu),
+        (ctrl.num_policy_samples, ctrl.num_knots, env.task.model.nu),
     )
     _, (y, U, U_guess, J_spc, J_policy, states) = jax.lax.scan(
-        _scan_fn, (x, U, psi), jnp.arange(env.episode_length)
+        _scan_fn, (x, U, psi, mean_latent), jnp.arange(env.episode_length)
     )
 
     return y, U, U_guess, J_spc, J_policy, states

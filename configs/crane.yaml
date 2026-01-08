@@ -1,0 +1,39 @@
+# Crane Manipulation Configuration
+
+# Environment
+task_name: crane
+episode_length: 500
+
+# Controller
+controller_type: predictive_sampling
+num_samples: 4
+noise_level: 0.05
+num_policy_samples: 2
+
+# Architecture
+architecture: cnn
+hidden_layers: [64, 64]  # feature_dims for CNN
+
+# Training
+num_iters: 10
+num_envs: 512
+learning_rate: 0.001
+batch_size: 1024
+num_epochs: 20
+exploration_noise_level: 0.0
+normalize_observations: true
+
+# Checkpointing & Evaluation
+checkpoint_every: 5
+num_eval_episodes: 3
+video_fps: 30
+video_quality: 3
+video_resolution: [1280, 720]
+
+# Logging & Visualization
+record_training_videos: true
+num_training_videos: 4
+record_eval_videos: true
+log_verbosity: 2
+
+experiment_name: null

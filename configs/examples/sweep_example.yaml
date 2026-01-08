@@ -1,0 +1,62 @@
+# Hyperparameter Sweep Example
+# This demonstrates how to sweep over different parameter values
+
+# Environment
+task_name: cart_pole
+episode_length: 200
+
+# Controller - sweep over controller types and samples
+controller_type: [predictive_sampling, cem, mppi]  # Sweep 2 values
+num_samples: [8, 16]  # Sweep 2 values
+noise_level: 0.1
+num_policy_samples: [8, 16]
+spline_type: zero
+num_knots: 10
+plan_horizon: 1.0
+
+# CEM parameters
+num_elites: 4
+sigma_start: 1.0
+sigma_min: 0.01
+
+# Architecture - sweep over architectures
+architecture: mlp  # Sweep 2 values
+hidden_layers: [64, 64]  # Sweep 2 architectures (use nested lists!)
+feature_dims: [32, 32]  # Single value (structural list, not swept)
+timestep_embedding_dim: 8
+
+# Training
+num_iters: 10
+num_envs: [64, 256]
+learning_rate: 0.001
+batch_size: 128
+num_epochs: 100
+exploration_noise_level: 0.0
+normalize_observations: true
+
+# Checkpointing & Evaluation
+checkpoint_every: 10
+num_eval_episodes: 0
+video_fps: 25
+video_quality: 1
+video_resolution: [640, 480]  # Structural list (not swept)
+
+# Logging & Visualization
+record_training_videos: true
+num_training_videos: 1
+record_eval_videos: false
+log_verbosity: 1
+
+# Experiment naming
+experiment_name: cart_pole_full_sweep
+
+# This will generate 2×2×2×2 = 16 experiments:
+# - controller_type: predictive_sampling, cem
+# - num_samples: 8, 16
+# - architecture: mlp, cnn  
+# - hidden_layers: [32,32], [64,64]
+#
+# Experiment names will be like:
+#   cart_pole_full_sweep_ctrl_ps_samples8_arch_mlp_layers32x32
+#   cart_pole_full_sweep_ctrl_cem_samples16_arch_cnn_layers64x64
+#   etc.

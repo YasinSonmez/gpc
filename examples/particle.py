@@ -39,6 +39,8 @@ if __name__ == "__main__":
             observation_size=env.observation_size,
             horizon=env.task.planning_horizon,
             hidden_layers=[32, 32],
+            use_cost_conditioning=False,
+            cost_embedding_dim=16,
             rngs=nnx.Rngs(0),
         )
         policy = train(

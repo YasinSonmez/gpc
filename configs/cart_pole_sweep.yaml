@@ -1,0 +1,43 @@
+# Cart Pole Hyperparameter Sweep Example
+
+# Environment
+task_name: cart_pole
+episode_length: 200
+
+# Controller - sweep over samples
+controller_type: predictive_sampling
+num_samples: [8, 16]  # Sweep parameter
+noise_level: 0.1
+num_policy_samples: [2, 4]  # Sweep parameter
+spline_type: zero
+num_knots: 10
+plan_horizon: 1.0
+
+# Architecture
+architecture: mlp
+hidden_layers: [64, 64]
+
+# Training - sweep over learning rate
+num_iters: [5, 10]  # Sweep parameter
+num_envs: 128
+learning_rate: [0.001, 0.01]  # Sweep parameter
+batch_size: 128
+num_epochs: 100
+exploration_noise_level: 0.0
+normalize_observations: true
+
+# Checkpointing & Evaluation
+checkpoint_every: 5
+num_eval_episodes: 0
+video_fps: 30
+video_quality: 5
+video_resolution: [640, 480]
+
+# Logging & Visualization
+record_training_videos: true
+num_training_videos: 1
+record_eval_videos: false
+log_verbosity: 1
+
+# Experiment naming
+experiment_name: cart_pole_sweep

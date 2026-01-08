@@ -1,0 +1,49 @@
+# Walker Locomotion Configuration
+
+# Environment
+task_name: walker
+episode_length: 500
+
+# Controller
+controller_type: predictive_sampling
+num_samples: 16
+noise_level: 0.3
+num_policy_samples: 16
+
+# Architecture
+architecture: mlp
+hidden_layers: [256, 256, 256]
+
+# feature_dims: [64, 64]
+# timestep_embedding_dim: 16
+
+# Training
+num_iters: 20
+num_envs: 128
+learning_rate: 0.001
+batch_size: 4096
+num_epochs: 10
+exploration_noise_level: 0.0
+normalize_observations: true
+
+# Cost-Conditioned Flow Matching (CFG)
+use_cfg: true                    # Enable cost conditioning
+cfg_drop_prob: 0.1               # 10% unconditional training for CFG
+cfg_guidance_scale: 5.0          # Guidance strength (w > 1 amplifies conditioning)
+use_replay_buffer: true          # Keep all historical data
+replay_buffer_size: 1000000       # Max buffer size
+
+# Checkpointing & Evaluation
+checkpoint_every: 10
+num_eval_episodes: 1
+video_fps: 30
+video_quality: 10
+video_resolution: [1920, 1080]  # HD for complex task
+
+# Logging & Visualization
+record_training_videos: true
+num_training_videos: 1
+record_eval_videos: true
+log_verbosity: 2
+
+experiment_name: walker_mlp_cfg

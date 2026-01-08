@@ -11,11 +11,15 @@ class PACParams:
     """Parameters for the policy-augmented controller.
 
     Attributes:
+        tk: The knot times of the control spline.
+        mean: The mean of the control spline knot distribution, μ = [u₀, ...].
         base_params: The parameters for the base controller.
-        policy_samples: Control sequences sampled from the policy.
+        policy_samples: Control knots sampled from the policy.
         rng: Random number generator key for domain randomization.
     """
 
+    tk: jax.Array
+    mean: jax.Array
     base_params: Any
     policy_samples: jax.Array
     rng: jax.Array
@@ -37,11 +41,16 @@ class PolicyAugmentedController(SamplingBasedController):
         """
         self.base_ctrl = base_ctrl
         self.num_policy_samples = num_policy_samples
+        # Pass through all parameters from base controller
         super().__init__(
             base_ctrl.task,
             base_ctrl.num_randomizations,
             base_ctrl.risk_strategy,
             seed=0,
+            plan_horizon=base_ctrl.plan_horizon,
+            spline_type=base_ctrl.spline_type,
+            num_knots=base_ctrl.num_knots,
+            iterations=base_ctrl.iterations,
         )
 
     def init_params(self) -> PACParams:
@@ -49,44 +58,63 @@ class PolicyAugmentedController(SamplingBasedController):
         base_params = self.base_ctrl.init_params()
         base_rng, our_rng = jax.random.split(base_params.rng)
         base_params = base_params.replace(rng=base_rng)
+        # Policy samples are now knots, not full control sequences
         policy_samples = jnp.zeros(
             (
                 self.num_policy_samples,
-                self.task.planning_horizon,
+                self.num_knots,
                 self.task.model.nu,
             )
         )
         return PACParams(
+            tk=base_params.tk,
+            mean=base_params.mean,
             base_params=base_params,
             policy_samples=policy_samples,
             rng=our_rng,
         )
 
-    def sample_controls(self, params: PACParams) -> Tuple[jax.Array, PACParams]:
-        """Sample control sequences from the base controller and the policy."""
+    def sample_knots(self, params: PACParams) -> Tuple[jax.Array, PACParams]:
+        """Sample control knots from the base controller and the policy."""
         # Samples from the base controller
-        base_samples, base_params = self.base_ctrl.sample_controls(
+        base_samples, base_params = self.base_ctrl.sample_knots(
             params.base_params
         )
 
-        # Include samples from the policy. Assumes that thes have already been
+        # Include samples from the policy. Assumes that these have already been
         # generated and stored in params.policy_samples.
         samples = jnp.append(base_samples, params.policy_samples, axis=0)
 
-        return samples, params.replace(base_params=base_params)
+        return samples, params.replace(
+            tk=base_params.tk,
+            mean=base_params.mean,
+            base_params=base_params
+        )
 
     def update_params(
         self, params: PACParams, rollouts: Trajectory
     ) -> PACParams:
         """Update the policy parameters according to the base controller."""
         base_params = self.base_ctrl.update_params(params.base_params, rollouts)
-        return params.replace(base_params=base_params)
+        return params.replace(
+            tk=base_params.tk,
+            mean=base_params.mean,
+            base_params=base_params
+        )
 
     def get_action(self, params: PACParams, t: float) -> jax.Array:
         """Get the action from the base controller at a given time."""
         return self.base_ctrl.get_action(params.base_params, t)
 
     def get_action_sequence(self, params: PACParams) -> jax.Array:
-        """Get the action sequence from the controller."""
-        timesteps = jnp.arange(self.task.planning_horizon) * self.task.dt
-        return jax.vmap(self.get_action, in_axes=(None, 0))(params, timesteps)
+        """Get the full control trajectory by interpolating knots."""
+        # Get the full interpolated control trajectory from base controller
+        # Use the interp_func to convert knots to control trajectory
+        tq = jnp.arange(self.ctrl_steps) * self.dt  # Query times
+        tk = params.tk  # Knot times
+        knots = params.mean  # Control knots
+        
+        # Interpolate each action dimension
+        controls = self.interp_func(tq, tk, knots.T).T
+        
+        return controls

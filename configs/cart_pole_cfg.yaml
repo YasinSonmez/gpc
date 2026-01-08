@@ -1,0 +1,51 @@
+# Cart Pole - Cost-Conditioned Flow Matching with CFG
+# Uses Classifier-Free Guidance to learn from all data while guiding toward low-cost behaviors
+
+# Environment
+task_name: cart_pole
+episode_length: 200
+
+# Controller
+controller_type: predictive_sampling
+num_samples: 8
+noise_level: 0.1
+num_policy_samples: 8
+spline_type: zero
+num_knots: 10
+plan_horizon: 1.0
+
+# Architecture (must be mlp for CFG)
+architecture: mlp
+hidden_layers: [64, 64]
+
+# Training
+num_iters: 10
+num_envs: 128
+learning_rate: 0.001
+batch_size: 4096
+num_epochs: 50
+exploration_noise_level: 0.0
+normalize_observations: true
+
+# Cost-Conditioned Flow Matching (CFG)
+use_cfg: true                    # Enable cost conditioning
+cfg_drop_prob: 0.1               # 10% unconditional training for CFG
+cfg_guidance_scale: 2.0          # Guidance strength (w > 1 amplifies conditioning)
+use_replay_buffer: true          # Keep all historical data
+replay_buffer_size: 500000       # Max buffer size
+
+# Checkpointing & Evaluation
+checkpoint_every: 10
+num_eval_episodes: 1
+video_fps: 30
+video_quality: 5
+video_resolution: [640, 480]
+
+# Logging & Visualization
+record_training_videos: true
+num_training_videos: 1
+record_eval_videos: true
+log_verbosity: 2
+
+# Experiment naming
+experiment_name: cart_pole_cfg

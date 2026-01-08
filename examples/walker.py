@@ -38,6 +38,8 @@ if __name__ == "__main__":
             horizon=env.task.planning_horizon,
             feature_dims=[64, 64],
             timestep_embedding_dim=16,
+            use_cost_conditioning=False,
+            cost_embedding_dim=16,
             rngs=nnx.Rngs(0),
         )
         policy = train(

@@ -1,0 +1,39 @@
+# Particle Navigation Configuration
+
+# Environment
+task_name: particle
+episode_length: 100
+
+# Controller
+controller_type: predictive_sampling
+num_samples: 4
+noise_level: 0.05
+num_policy_samples: 2
+
+# Architecture
+architecture: mlp
+hidden_layers: [32, 32]
+
+# Training
+num_iters: 15
+num_envs: 64
+learning_rate: 0.001
+batch_size: 64
+num_epochs: 50
+exploration_noise_level: 0.0
+normalize_observations: true
+
+# Checkpointing & Evaluation
+checkpoint_every: 5
+num_eval_episodes: 3
+video_fps: 20
+video_quality: 5
+video_resolution: [480, 360]
+
+# Logging & Visualization
+record_training_videos: true
+num_training_videos: 2
+record_eval_videos: true
+log_verbosity: 2
+
+experiment_name: null

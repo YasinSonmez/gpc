@@ -1,0 +1,39 @@
+# Walker: CNN + MPPI
+task_name: walker
+episode_length: 500
+experiment_name: walker_cnn_mppi
+
+# Controller
+controller_type: mppi
+num_samples: 16
+noise_level: 0.3
+num_policy_samples: 16
+temperature: 0.1
+num_randomizations: 1
+
+# Architecture
+architecture: cnn
+feature_dims: [64, 64]
+timestep_embedding_dim: 16
+
+# Training
+num_iters: 20
+num_envs: 128
+learning_rate: 0.001
+batch_size: 128
+num_epochs: 10
+exploration_noise_level: 0.0
+normalize_observations: true
+
+# Checkpointing & Evaluation
+checkpoint_every: 10
+num_eval_episodes: 1
+video_fps: 25
+video_quality: 5
+video_resolution: [640, 480]
+
+# Logging
+record_training_videos: true
+num_training_videos: 1
+record_eval_videos: true
+log_verbosity: 2

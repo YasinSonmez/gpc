@@ -58,6 +58,8 @@ class Policy:
         y: jax.Array,
         rng: jax.Array,
         warm_start_level: float = 0.0,
+        target_cost: float | None = None,
+        cfg_scale: float = 1.0,
     ) -> jax.Array:
         """Generate an action sequence conditioned on the observation.
 
@@ -66,6 +68,8 @@ class Policy:
             y: The current observation.
             rng: The random number generator key.
             warm_start_level: The degree of warm-starting to use, in [0, 1].
+            target_cost: Target normalized cost for CFG (0=best). If None, no CFG.
+            cfg_scale: Guidance scale for CFG (w > 1 increases guidance strength).
 
         A warm-start level of 0.0 means the action sequence is generated from
         scratch, with the seed for flow matching drawn from a random normal
@@ -84,10 +88,22 @@ class Policy:
         noise = jax.random.normal(rng, prev.shape)
         U = warm_start_level * prev + (1 - warm_start_level) * noise
 
+        # Check if model supports cost conditioning (has cost parameter)
+        use_cfg = target_cost is not None and cfg_scale != 1.0
+
         def _step(args: Tuple[jax.Array, float]) -> Tuple[jax.Array, float]:
             """Flow the sample U along the learned vector field."""
             U, t = args
-            U += self.dt * self.model(U, y, t)
+            
+            if use_cfg and hasattr(self.model, 'forward_conditional'):
+                # CFG: v_final = v_uncond + w * (v_cond - v_uncond)
+                v_uncond = self.model(U, y, t, cost=None)
+                v_cond = self.model(U, y, t, cost=jnp.array(target_cost))
+                v = v_uncond + cfg_scale * (v_cond - v_uncond)
+            else:
+                v = self.model(U, y, t, use_running_average=True)
+            
+            U += self.dt * v
             U = jax.numpy.clip(U, -1, 1)
             return U, t + self.dt
 

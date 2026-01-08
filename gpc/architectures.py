@@ -69,7 +69,7 @@ class DenoisingMLP(nnx.Module):
             [input_size] + list(hidden_layers) + [output_size], rngs=rngs
         )
 
-    def __call__(self, u: jax.Array, y: jax.Array, t: jax.Array) -> jax.Array:
+    def __call__(self, u: jax.Array, y: jax.Array, t: jax.Array, use_running_average: bool = False) -> jax.Array:
         """Forward pass through the network."""
         batches = u.shape[:-2]
         u_flat = u.reshape(batches + (self.horizon * self.action_size,))
@@ -130,10 +130,10 @@ class Conv1DBlock(nnx.Module):
         )
         self.bn = nnx.BatchNorm(num_features=out_features, rngs=rngs)
 
-    def __call__(self, x: jax.Array) -> jax.Array:
+    def __call__(self, x: jax.Array, use_running_average: bool = False) -> jax.Array:
         """Forward pass through the block."""
         x = self.c(x)
-        x = self.bn(x)
+        x = self.bn(x, use_running_average=use_running_average)
         x = nnx.swish(x)
         return x
 
@@ -186,12 +186,13 @@ class ConditionalResidualBlock(nnx.Module):
             rngs=rngs,
         )
 
-    def __call__(self, x: jax.Array, y: jax.Array) -> jax.Array:
+    def __call__(self, x: jax.Array, y: jax.Array, use_running_average: bool = False) -> jax.Array:
         """Forward pass through the block."""
-        z = self.encoder(x)
+        z = self.encoder(x, use_running_average=use_running_average)
         z += self.linear(y)
-        z = self.dropout(z)
-        z = self.decoder(z)
+        if not use_running_average:  # Only dropout during training
+            z = self.dropout(z)
+        z = self.decoder(z, use_running_average=use_running_average)
         return z + self.residual(x)
 
 
@@ -244,13 +245,13 @@ class DenoisingCNN(nnx.Module):
                 ),
             )
 
-    def __call__(self, u: jax.Array, y: jax.Array, t: jax.Array) -> jax.Array:
+    def __call__(self, u: jax.Array, y: jax.Array, t: jax.Array, use_running_average: bool = False) -> jax.Array:
         """Forward pass through the network."""
         emb = self.positional_embedding(t)
         y = jnp.concatenate([y, emb], axis=-1)
 
-        x = self.l0(u, y)
+        x = self.l0(u, y, use_running_average=use_running_average)
         for i in range(1, self.num_layers):
-            x = getattr(self, f"l{i}")(x, y)
+            x = getattr(self, f"l{i}")(x, y, use_running_average=use_running_average)
 
         return x + u
