@@ -7,6 +7,8 @@ from .particle import ParticleEnv
 from .pendulum import PendulumEnv
 from .pusht import PushTEnv
 from .walker import WalkerEnv
+from .humanoid_mocap import HumanoidMocapEnv
+from .walker_gym import WalkerGymEnv
 
 __all__ = [
     "SimulatorState",
@@ -18,5 +20,7 @@ __all__ = [
     "PendulumEnv",
     "PushTEnv",
     "WalkerEnv",
+    "WalkerGymEnv",
     "HumanoidEnv",
+    "HumanoidMocapEnv",
 ]

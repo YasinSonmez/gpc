@@ -10,6 +10,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from gpc.architectures import MLP, PositionalEmbedding
+from gpc.replay_buffer import ReplayBuffer
 
 
 class CostEmbedding(nnx.Module):
@@ -80,8 +81,11 @@ class CostConditionedMLP(nnx.Module):
         # Cost embedding network
         self.cost_embed = CostEmbedding(cost_embed_dim, rngs)
         
-        # Learnable null embedding for unconditional (CFG dropout)
-        self.null_embed = nnx.Param(jax.random.normal(rngs.params(), (cost_embed_dim,)) * 0.02)
+        # Fixed null embedding for unconditional (CFG dropout)
+        # Using -1.0 as sentinel: clearly distinct from cost_embed outputs
+        # (cost=0 is our target, so zeros would be ambiguous)
+        # nnx.Variable (not Param) = stored but not trained
+        self.null_embed = nnx.Variable(jnp.full((cost_embed_dim,), -1.0))
 
         # Main MLP: input = [U_flat, y, t, cost_embed]
         input_size = horizon * action_size + observation_size + 1 + cost_embed_dim
@@ -96,6 +100,7 @@ class CostConditionedMLP(nnx.Module):
         y: jax.Array,
         t: jax.Array,
         cost: Optional[jax.Array] = None,
+        drop_cost_mask: Optional[jax.Array] = None,
         use_running_average: bool = False,
     ) -> jax.Array:
         """Forward pass.
@@ -105,6 +110,8 @@ class CostConditionedMLP(nnx.Module):
             y: Observation, shape (..., observation_size).
             t: Diffusion time, shape (..., 1).
             cost: Normalized cost, shape (...,) or (..., 1). If None, uses null.
+            drop_cost_mask: Boolean mask, True means drop cost (use null). 
+                           Shape (...,) or (..., 1).
             use_running_average: Unused, for API compatibility.
             
         Returns:
@@ -119,6 +126,30 @@ class CostConditionedMLP(nnx.Module):
             cost_emb = jnp.broadcast_to(self.null_embed.value, batches + (self.cost_embed_dim,))
         else:
             cost_emb = self.cost_embed(cost)
+            
+            # Apply dropout mask if provided
+            if drop_cost_mask is not None:
+                # Ensure mask handles broadcasting
+                if drop_cost_mask.ndim < cost_emb.ndim:
+                     # Add feature dimension to mask: (batch,) -> (batch, 1) to match (batch, dim)
+                    drop_cost_mask = drop_cost_mask[..., None]
+                
+                null_emb = jnp.broadcast_to(self.null_embed.value, cost_emb.shape)
+                cost_emb = jnp.where(drop_cost_mask, null_emb, cost_emb)
+
+        # Broadcast cost_emb to match batch dimensions if necessary
+        # u_flat has shape (batches..., dim)
+        # cost_emb has shape (batches_from_cost..., dim)
+        if len(batches) > 0 and cost_emb.ndim == 1:
+             # Broadcast (dim,) -> (batches..., dim)
+             cost_emb = jnp.broadcast_to(cost_emb, batches + (self.cost_embed_dim,))
+        elif cost_emb.shape[:-1] != batches:
+             # Try to broadcast to match batches
+             try:
+                 cost_emb = jnp.broadcast_to(cost_emb, batches + (self.cost_embed_dim,))
+             except ValueError:
+                 # If shapes are incompatible, let concatenate raise the error
+                 pass
         
         x = jnp.concatenate([u_flat, y, t, cost_emb], axis=-1)
         x = self.mlp(x)
@@ -144,163 +175,6 @@ class CostConditionedMLP(nnx.Module):
         return self(u, y, t, cost=None)
 
 
-class ReplayBuffer:
-    """Simple replay buffer that accumulates data across iterations.
-    
-    Stores (observation, action, old_action, cost) tuples with normalized costs.
-    """
-
-    def __init__(self, max_size: int = 1_000_000):
-        """Initialize buffer.
-        
-        Args:
-            max_size: Maximum number of data points to store.
-        """
-        self.max_size = max_size
-        self.observations = []
-        self.actions = []
-        self.old_actions = []
-        self.costs = []  # Per-datapoint normalized cost
-        self._size = 0
-        
-        # Running statistics for cost normalization
-        self._cost_mean = 0.0
-        self._cost_std = 1.0
-        self._cost_min = float('inf')
-        self._num_episodes = 0
-
-    def add(
-        self,
-        observations: jax.Array,
-        actions: jax.Array,
-        old_actions: jax.Array,
-        episode_costs: jax.Array,
-    ) -> None:
-        """Add new data to the buffer.
-        
-        Args:
-            observations: Shape [num_episodes, episode_length, obs_dim].
-            actions: Shape [num_episodes, episode_length, horizon, action_dim].
-            old_actions: Shape [num_episodes, episode_length, horizon, action_dim].
-            episode_costs: Per-episode costs, shape [num_episodes] or [num_episodes, episode_length].
-        """
-        # Convert to numpy for storage
-        obs_np = jnp.asarray(observations)
-        act_np = jnp.asarray(actions)
-        old_act_np = jnp.asarray(old_actions)
-        costs_np = jnp.asarray(episode_costs)
-        
-        num_episodes = obs_np.shape[0]
-        episode_length = obs_np.shape[1]
-        
-        # Reduce episode costs to scalar per episode if needed
-        if costs_np.ndim == 2:
-            costs_np = jnp.mean(costs_np, axis=1)
-        
-        # Update cost statistics
-        self._num_episodes += num_episodes
-        all_costs = costs_np
-        self._cost_mean = float(jnp.mean(all_costs))
-        self._cost_std = float(jnp.std(all_costs) + 1e-8)
-        self._cost_min = float(jnp.min(all_costs))
-        
-        # Broadcast episode cost to all timesteps
-        # costs_per_timestep shape: [num_episodes, episode_length]
-        costs_per_timestep = jnp.broadcast_to(
-            costs_np[:, None], (num_episodes, episode_length)
-        )
-        
-        # Flatten and append
-        self.observations.append(obs_np.reshape(-1, obs_np.shape[-1]))
-        self.actions.append(act_np.reshape(-1, act_np.shape[-2], act_np.shape[-1]))
-        self.old_actions.append(old_act_np.reshape(-1, old_act_np.shape[-2], old_act_np.shape[-1]))
-        self.costs.append(costs_per_timestep.flatten())
-        
-        self._size += num_episodes * episode_length
-        
-        # Trim if over capacity
-        if self._size > self.max_size:
-            self._trim()
-
-    def _trim(self) -> None:
-        """Trim buffer to max_size using FIFO."""
-        # Concatenate all data
-        all_obs = jnp.concatenate(self.observations, axis=0)
-        all_act = jnp.concatenate(self.actions, axis=0)
-        all_old_act = jnp.concatenate(self.old_actions, axis=0)
-        all_costs = jnp.concatenate(self.costs, axis=0)
-        
-        # Keep only the most recent data
-        keep_from = all_obs.shape[0] - self.max_size
-        self.observations = [all_obs[keep_from:]]
-        self.actions = [all_act[keep_from:]]
-        self.old_actions = [all_old_act[keep_from:]]
-        self.costs = [all_costs[keep_from:]]
-        self._size = self.max_size
-
-    def sample(
-        self, batch_size: int, rng: jax.Array
-    ) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-        """Sample a batch of data.
-        
-        Args:
-            batch_size: Number of samples.
-            rng: Random key.
-            
-        Returns:
-            (observations, actions, old_actions, normalized_costs)
-        """
-        # Concatenate all stored data
-        all_obs = jnp.concatenate(self.observations, axis=0)
-        all_act = jnp.concatenate(self.actions, axis=0)
-        all_old_act = jnp.concatenate(self.old_actions, axis=0)
-        all_costs = jnp.concatenate(self.costs, axis=0)
-        
-        # Sample indices
-        indices = jax.random.randint(rng, (batch_size,), 0, all_obs.shape[0])
-        
-        # Normalize costs to [0, 1] range (0 = best, 1 = worst)
-        normalized_costs = (all_costs - self._cost_min) / (self._cost_std * 3 + 1e-8)
-        normalized_costs = jnp.clip(normalized_costs, 0.0, 1.0)
-        
-        return (
-            all_obs[indices],
-            all_act[indices],
-            all_old_act[indices],
-            normalized_costs[indices],
-        )
-
-    def get_all(self) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-        """Get all data in the buffer.
-        
-        Returns:
-            (observations, actions, old_actions, normalized_costs)
-        """
-        all_obs = jnp.concatenate(self.observations, axis=0)
-        all_act = jnp.concatenate(self.actions, axis=0)
-        all_old_act = jnp.concatenate(self.old_actions, axis=0)
-        all_costs = jnp.concatenate(self.costs, axis=0)
-        
-        # Normalize costs
-        normalized_costs = (all_costs - self._cost_min) / (self._cost_std * 3 + 1e-8)
-        normalized_costs = jnp.clip(normalized_costs, 0.0, 1.0)
-        
-        return all_obs, all_act, all_old_act, normalized_costs
-
-    @property
-    def size(self) -> int:
-        """Current number of data points."""
-        return self._size
-
-    @property
-    def best_cost(self) -> float:
-        """Best (lowest) cost seen so far."""
-        return self._cost_min
-    
-    @property
-    def target_cost_normalized(self) -> float:
-        """Target cost for CFG inference (normalized, 0 = best)."""
-        return 0.0  # Always target the best
 
 
 def fit_policy_cfg(
@@ -310,7 +184,10 @@ def fit_policy_cfg(
     batch_size: int,
     num_epochs: int,
     rng: jax.Array,
+    normalizer: Optional[nnx.BatchNorm] = None,
+    update_normalizer: bool = True,
     cfg_drop_prob: float = 0.1,
+    cost_weight_temperature: float = 1.0,
     sigma_min: float = 1e-2,
     verbose: bool = False,
 ) -> Tuple[jax.Array, dict]:
@@ -323,6 +200,8 @@ def fit_policy_cfg(
         batch_size: Batch size.
         num_epochs: Number of epochs.
         rng: Random key.
+        normalizer: Optional normalizer (BatchNorm) to apply to observations.
+        update_normalizer: Whether to update normalizer stats during training.
         cfg_drop_prob: Probability of dropping cost condition (for CFG).
         sigma_min: Flow matching sigma_min parameter.
         verbose: Print CFG validation info.
@@ -348,16 +227,24 @@ def fit_policy_cfg(
         drop_mask: jax.Array,
     ) -> jax.Array:
         """Compute CFG flow-matching loss."""
+        # Normalize observations if normalizer provided
+        if normalizer is not None:
+            # use_running_average=False means update running statistics (if training)
+            # use_running_average=True means use stored statistics (if eval/expert)
+            obs = normalizer(obs, use_running_average=not update_normalizer)
+
+        # Debugging: show normalized range
+        # Note: We can't easily use 'i' here because it's in train_step not loss_fn. 
+        # But we can just use a debug callback if normalizer stats look weird.
+        # Let's check the normalizer stats in train_config instead.
+        
         alpha = 1.0 - sigma_min
         noised_action = t[..., None] * act + (1 - alpha * t[..., None]) * noise
         target = act - alpha * noise
         
-        # Vectorized: compute both conditional and unconditional, then select
-        pred_cond = model(noised_action, obs, t, cost=costs)
-        pred_uncond = model(noised_action, obs, t, cost=None)
-        
-        # Select based on drop_mask (True = unconditional)
-        pred = jnp.where(drop_mask[..., None, None], pred_uncond, pred_cond)
+        # Compute prediction with random cost dropping
+        # drop_mask: True means use null embedding (unconditional)
+        pred = model(noised_action, obs, t, cost=costs, drop_cost_mask=drop_mask)
 
         # Cosine similarity weighting (same as original)
         v1 = (old_act - act).reshape(act.shape[0], -1)
@@ -366,11 +253,24 @@ def fit_policy_cfg(
         norm1 = jnp.linalg.norm(v1, axis=-1)
         norm2 = jnp.linalg.norm(v2, axis=-1)
         cosine_similarity = dot / (norm1 * norm2 + 1e-8)
-        weight = jax.lax.stop_gradient(jnp.exp(2 * (cosine_similarity - 1)))
+        flow_weight = jax.lax.stop_gradient(jnp.exp(2 * (cosine_similarity - 1)))
+        
+        # Cost-based weighting: prioritize low-cost samples
+        # costs are normalized to [0, 1] (roughly)
+        # If temperature <= 0, disable cost weighting (pure CFG)
+        if cost_weight_temperature > 0:
+            cost_weight = jnp.exp(-costs / cost_weight_temperature)
+        else:
+            cost_weight = jnp.ones_like(costs)
+        cost_weight = jax.lax.stop_gradient(cost_weight)
+        
+        # Combine weights
+        # Note: drop_mask doesn't affect weighting; we want to learn good unconditional flows too
+        total_weight = flow_weight * cost_weight
 
         # MSE loss
         sq_error = jnp.mean(jnp.square(pred - target), axis=(-2, -1))
-        return jnp.mean(weight * sq_error)
+        return jnp.mean(total_weight * sq_error)
 
     def _train_step(
         model: nnx.Module,
@@ -381,9 +281,26 @@ def fit_policy_cfg(
         rng, batch_rng, noise_rng, t_rng, drop_rng = jax.random.split(rng, 5)
         
         # Sample batch from replay buffer
-        batch_obs, batch_act, batch_old_act, batch_costs = replay_buffer.sample(
-            batch_size, batch_rng
-        )
+        batch = replay_buffer.sample(batch_size)
+        batch_obs = batch['obs']
+        batch_act = batch['actions']
+        batch_old_act = batch['old_actions']
+        batch_costs = batch['costs']
+
+        # Debug: Print stats intermittently
+        def _print_stats(obs, act, costs):
+             print(f"      [Step {i}] Obs range: [{jnp.min(obs):.2f}, {jnp.max(obs):.2f}] | Act range: [{jnp.min(act):.2f}, {jnp.max(act):.2f}] | Costs range: [{jnp.min(costs):.2f}, {jnp.max(costs):.2f}]")
+             return None
+        
+        # Only print occasionally to avoid slowing down training too much
+        # But for warm-start we want more visibility.
+        if verbose:
+             jax.lax.cond(
+                 i % 100 == 0,
+                 lambda _: jax.debug.callback(_print_stats, batch_obs, batch_act, batch_costs),
+                 lambda _: None,
+                 operand=None
+             )
 
         # Sample noise and time
         noise = jax.random.normal(noise_rng, batch_act.shape)
@@ -397,7 +314,12 @@ def fit_policy_cfg(
         loss, grad = nnx.value_and_grad(_loss_fn)(
             model, batch_obs, batch_act, batch_old_act, batch_costs, noise, t, drop_mask
         )
-        optimizer.update(grad)
+        
+        # If normalizer is provided and we want to update it, we need to pass its gradient too?
+        # NO: nnx.BatchNorm typically updates its state variables (running_mean) via side effects.
+        # But for that to work in a JITted grad pass, we must include its state in the diff.
+        # However, for simply imitating an expert (warmstart), we might prefer to just update it.
+        optimizer.update(model, grad)
 
         return rng, loss, num_dropped
 
@@ -431,3 +353,107 @@ def fit_policy_cfg(
         print(f"    Loss: {float(losses[0]):.4f} -> {float(losses[-1]):.4f}")
 
     return losses[-1], info
+
+
+def fit_policy_cost_conditioned(
+    observations: jax.Array,
+    action_sequences: jax.Array,
+    old_action_sequences: jax.Array,
+    costs: jax.Array,
+    model: nnx.Module,
+    optimizer: nnx.Optimizer,
+    batch_size: int,
+    num_epochs: int,
+    rng: jax.Array,
+    normalizer: Optional[nnx.BatchNorm] = None,
+    update_normalizer: bool = True,
+    sigma_min: float = 1e-2,
+) -> jax.Array:
+    """Fit a cost-conditioned flow matching model (without CFG).
+    
+    Args:
+        observations: Observations y.
+        action_sequences: Target action sequences U.
+        old_action_sequences: Previous action sequences U_guess.
+        costs: Normalized costs for each sample.
+        model: CostConditionedMLP model.
+        optimizer: Optimizer.
+        batch_size: Batch size.
+        num_epochs: Number of epochs.
+        rng: Random key.
+        sigma_min: Flow matching sigma_min parameter.
+        
+    Returns:
+        Final loss.
+    """
+    num_data_points = observations.shape[0]
+    num_batches = max(1, num_data_points // batch_size)
+    
+    assert hasattr(model, 'cost_embed'), "Model must be CostConditionedMLP"
+    
+    def _loss_fn(
+        model: nnx.Module,
+        obs: jax.Array,
+        act: jax.Array,
+        old_act: jax.Array,
+        costs: jax.Array,
+        noise: jax.Array,
+        t: jax.Array,
+    ) -> jax.Array:
+        # Normalize observations
+        if normalizer is not None:
+             obs = normalizer(obs, use_running_average=not update_normalizer)
+
+        alpha = 1.0 - sigma_min
+        noised_action = t[..., None] * act + (1 - alpha * t[..., None]) * noise
+        target = act - alpha * noise
+        pred = model(noised_action, obs, t, cost=costs)
+        # Per-sample cosine-similarity weighting (match CFG implementation)
+        v1 = (old_act - act).reshape(act.shape[0], -1)
+        v2 = (noise - act).reshape(noise.shape[0], -1)
+        dot = jnp.sum(v1 * v2, axis=-1)
+        norm1 = jnp.linalg.norm(v1, axis=-1)
+        norm2 = jnp.linalg.norm(v2, axis=-1)
+        cosine_similarity = dot / (norm1 * norm2 + 1e-8)
+        weight = jax.lax.stop_gradient(jnp.exp(2 * (cosine_similarity - 1)))
+
+        # Per-sample squared error, then weight and average
+        sq_error = jnp.mean(jnp.square(pred - target), axis=(-2, -1))
+        return jnp.mean(weight * sq_error)
+    
+    def _train_step(
+        model: nnx.Module,
+        optimizer: nnx.Optimizer,
+        rng: jax.Array,
+    ) -> Tuple[jax.Array, jax.Array]:
+        rng, batch_rng = jax.random.split(rng)
+        batch_idx = jax.random.randint(
+            batch_rng, (batch_size,), 0, num_data_points
+        )
+        batch_obs = observations[batch_idx]
+        batch_act = action_sequences[batch_idx]
+        batch_old_act = old_action_sequences[batch_idx]
+        batch_costs = costs[batch_idx]
+        
+        rng, noise_rng, t_rng = jax.random.split(rng, 3)
+        noise = jax.random.normal(noise_rng, batch_act.shape)
+        t = jax.random.uniform(t_rng, (batch_size, 1))
+        
+        loss, grad = nnx.value_and_grad(_loss_fn)(
+            model, batch_obs, batch_act, batch_old_act, batch_costs, noise, t
+        )
+        optimizer.update(model, grad)
+        
+        return rng, loss
+    
+    @nnx.scan
+    def _scan_fn(carry: Tuple, i: int) -> Tuple:
+        model, optimizer, rng = carry
+        rng, loss = _train_step(model, optimizer, rng)
+        return (model, optimizer, rng), loss
+    
+    _, losses = _scan_fn(
+        (model, optimizer, rng), jnp.arange(num_batches * num_epochs)
+    )
+    
+    return losses[-1]

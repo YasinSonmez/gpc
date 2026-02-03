@@ -21,6 +21,8 @@ def test_interactive(
     mj_data: mujoco.MjData = None,
     inference_timestep: float = 0.1,
     warm_start_level: float = 1.0,
+    cfg_guidance_scale: float = 1.0,
+    target_cost: float | None = None,
 ) -> None:
     """Test a GPC policy with an interactive simulation.
 
@@ -30,6 +32,8 @@ def test_interactive(
         mj_data: The initial state for the simulation.
         inference_timestep: The timestep dt to use for flow matching inference.
         warm_start_level: The warm start level to use for the policy.
+        cfg_guidance_scale: Guidance scale for CFG (w > 1 increases guidance).
+        target_cost: Target normalized cost for CFG (0=best). If None, no CFG.
     """
     rng = jax.random.key(0)
     task = env.task
@@ -38,7 +42,8 @@ def test_interactive(
     policy = policy.replace(dt=inference_timestep)
     policy.model.eval()
     jit_policy = jax.jit(
-        partial(policy.apply, warm_start_level=warm_start_level)
+        partial(policy.apply, warm_start_level=warm_start_level, 
+                target_cost=target_cost, cfg_scale=cfg_guidance_scale)
     )
 
     # Set up the mujoco simultion
@@ -105,6 +110,8 @@ def test_and_record(
     inference_timestep: float = 0.1,
     warm_start_level: float = 1.0,
     video_fps: int = 30,
+    cfg_guidance_scale: float = 1.0,
+    target_cost: float | None = None,
 ) -> None:
     """Test a GPC policy and record videos (works in headless mode).
 
@@ -116,6 +123,8 @@ def test_and_record(
         inference_timestep: The timestep dt to use for flow matching inference.
         warm_start_level: The warm start level to use for the policy.
         video_fps: Frames per second for the output video.
+        cfg_guidance_scale: Guidance scale for CFG (w > 1 increases guidance).
+        target_cost: Target normalized cost for CFG (0=best). If None, no CFG.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -127,7 +136,8 @@ def test_and_record(
     policy = policy.replace(dt=inference_timestep)
     policy.model.eval()
     jit_policy = jax.jit(
-        partial(policy.apply, warm_start_level=warm_start_level)
+        partial(policy.apply, warm_start_level=warm_start_level,
+                target_cost=target_cost, cfg_scale=cfg_guidance_scale)
     )
 
     @jax.jit

@@ -26,17 +26,38 @@ class SimulatorState:
 class TrainingEnv(ABC):
     """Abstract class defining a training environment."""
 
-    def __init__(self, task: Task, episode_length: int) -> None:
-        """Initialize the training environment."""
+    def __init__(
+        self,
+        task: Task,
+        episode_length: int,
+        sim_steps_per_control_step: int = 1,
+        render_camera: str = -1,
+    ) -> None:
+        """Initialize the training environment.
+        
+        Args:
+            task: The hydrax task.
+            episode_length: Number of control steps in an episode.
+            sim_steps_per_control_step: Number of physics steps per control step.
+            render_camera: Camera name or ID for rendering.
+        """
         self.task = task
         self.episode_length = episode_length
-        self.renderer = mujoco.Renderer(self.task.mj_model)
+        self.sim_steps_per_control_step = sim_steps_per_control_step
+        self.render_camera = render_camera if render_camera is not None else -1
+        self._renderer = None
 
-        # Disable shadows and reflections for faster rendering
-        self.renderer.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = False
-        self.renderer.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = False
-        self.renderer.scene.flags[mujoco.mjtRndFlag.mjRND_FOG] = False
-        self.renderer.scene.flags[mujoco.mjtRndFlag.mjRND_HAZE] = False
+    @property
+    def renderer(self) -> mujoco.Renderer:
+        """Lazy-initialize the renderer only when needed."""
+        if self._renderer is None:
+            self._renderer = mujoco.Renderer(self.task.mj_model)
+            # Disable shadows and reflections for faster rendering
+            self._renderer.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = False
+            self._renderer.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = False
+            self._renderer.scene.flags[mujoco.mjtRndFlag.mjRND_FOG] = False
+            self._renderer.scene.flags[mujoco.mjtRndFlag.mjRND_HAZE] = False
+        return self._renderer
 
     def init_state(self, rng: jax.Array) -> SimulatorState:
         """Initialize the simulator state."""
@@ -67,7 +88,11 @@ class TrainingEnv(ABC):
         for i in steps:
             mjx_data = jax.tree.map(lambda x: x[i], states.data)  # noqa: B023
             mj_data = mjx.get_data(self.task.mj_model, mjx_data)
-            self.renderer.update_scene(mj_data)
+            try:
+                self.renderer.update_scene(mj_data, camera=self.render_camera)
+            except ValueError:
+                # Fallback to free camera if specified camera doesn't exist
+                self.renderer.update_scene(mj_data, camera=-1)
             pixels = self.renderer.render()  # H, W, C
             frames.append(pixels.transpose(2, 0, 1))  # C, H, W
 
@@ -137,12 +162,20 @@ class TrainingEnv(ABC):
         Returns:
             The new simulator state and the new time step.
         """
+        def _step_fn(data, _):
+            return mjx.step(self.task.model, data), None
+
         # Check if the episode is over
         next_state = jax.lax.cond(
             self.episode_over(state),
             lambda _: self._reset_state(state),
             lambda _: state.replace(
-                data=mjx.step(self.task.model, state.data.replace(ctrl=action)),
+                data=jax.lax.scan(
+                    _step_fn,
+                    state.data.replace(ctrl=action),
+                    None,
+                    length=self.sim_steps_per_control_step,
+                )[0],
                 t=state.t + 1,
             ),
             operand=None,

@@ -46,13 +46,21 @@ class TrainingConfig:
     num_epochs: int = 100
     exploration_noise_level: float = 0.0
     normalize_observations: bool = True
+    seed: int = 0
     
     # Cost-Conditioned Flow Matching (CFG) settings
-    use_cfg: bool = False  # Enable cost-conditioned flow matching with CFG
+    use_cost_conditioning: bool = False  # Enable cost-conditioned flow matching
+    use_cfg: bool = False  # Enable Classifier-Free Guidance
     cfg_drop_prob: float = 0.1  # Probability of dropping cost condition during training
     cfg_guidance_scale: float = 2.0  # Guidance scale w for inference (w > 1 = stronger guidance)
+    cost_weight_temperature: float = 1.0  # Temperature for cost weighting
+    
     use_replay_buffer: bool = False  # Retain all historical data (True) or clear each iter (False)
     replay_buffer_size: int = 500_000  # Maximum replay buffer size
+    buffer_filtering_fraction: float = 0.0  # Fraction of expert return to keep (0 = disable)
+    initial_replay_buffer_path: Optional[str] = None
+    warmstart_policy_buffer: bool = False
+    warmstart_value_buffer: bool = False
     
     # Evaluation and logging
     checkpoint_every: int = 10
@@ -63,11 +71,30 @@ class TrainingConfig:
     record_training_videos: bool = True
     num_training_videos: int = 2
     record_eval_videos: bool = True
+    render_camera: str = "floating"
+    
+    # WandB settings
+    use_wandb: bool = False
+    wandb_project: str = "gpc"
     
     # Output settings
     experiment_name: Optional[str] = None
     log_verbosity: int = 1  # 0=minimal, 1=normal, 2=verbose
     strategy: str = "policy"  # "policy" or "best" for simulation advancement
+    
+    # Value Function Integration
+    use_value_function: bool = False
+    value_hidden_layers: list[int] = field(default_factory=lambda: [256, 256, 256])
+    value_learning_rate: float = 1e-3
+    iql_tau: float = 0.1
+    discount_factor: float = 0.99
+    polyak_tau: float = 0.005
+    value_alpha_start: float = 0.0
+    value_alpha_end: float = 0.1
+    value_alpha_start_iter: int = 0
+    value_alpha_ramp_type: str = "linear"
+    value_buffer_window: int = 0  # Number of recent iterations to keep in buffer (0 = keep all)
+    value_train_epochs: int = 4
     
     @classmethod
     def from_yaml(cls, path: str | Path) -> "TrainingConfig":

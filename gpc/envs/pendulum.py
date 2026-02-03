@@ -9,11 +9,12 @@ from gpc.envs import TrainingEnv
 class PendulumEnv(TrainingEnv):
     """Training environment for the pendulum swingup task."""
 
-    def __init__(self, episode_length: int) -> None:
+    def __init__(self, episode_length: int, render_camera: str = -1) -> None:
         """Set up the pendulum training environment."""
         super().__init__(
             task=Pendulum(),
             episode_length=episode_length,
+            render_camera=render_camera,
         )
 
     def reset(self, data: mjx.Data, rng: jax.Array) -> mjx.Data:

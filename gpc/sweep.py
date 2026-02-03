@@ -97,7 +97,7 @@ def _is_structural_list(param_name: str) -> bool:
     To sweep these, use nested lists:
     - hidden_layers: [[32, 32], [64, 64]] sweeps over architectures
     """
-    structural = {'hidden_layers', 'feature_dims', 'video_resolution'}
+    structural = {'hidden_layers', 'value_hidden_layers', 'feature_dims', 'video_resolution'}
     return param_name in structural
 
 

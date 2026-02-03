@@ -29,10 +29,14 @@ from gpc.envs import (
     CraneEnv,
     DoubleCartPoleEnv,
     HumanoidEnv,
+    HumanoidMocapEnv,
+    HumanoidMocapEnv,
+    HumanoidBraxEnv,
     ParticleEnv,
     PendulumEnv,
     PushTEnv,
     WalkerEnv,
+    WalkerGymEnv,
 )
 from gpc.experiment import ExperimentManager
 from gpc.policy import Policy
@@ -48,8 +52,11 @@ TASK_ENVS = {
     "pendulum": PendulumEnv,
     "particle": ParticleEnv,
     "walker": WalkerEnv,
+    "walker_gym": WalkerGymEnv,
     "crane": CraneEnv,
     "humanoid": HumanoidEnv,
+    "humanoid_mocap": HumanoidMocapEnv,
+    "humanoid_brax": HumanoidBraxEnv,
     "pusht": PushTEnv,
 }
 
@@ -63,7 +70,10 @@ def create_environment(config: TrainingConfig):
         )
     
     env_class = TASK_ENVS[config.task_name]
-    return env_class(episode_length=config.episode_length)
+    return env_class(
+        episode_length=config.episode_length,
+        render_camera=config.render_camera
+    )
 
 
 def create_controller(env, config: TrainingConfig):
@@ -73,6 +83,7 @@ def create_controller(env, config: TrainingConfig):
         "plan_horizon": config.plan_horizon,
         "spline_type": config.spline_type,
         "num_knots": config.num_knots,
+        "num_randomizations": config.num_randomizations,
     }
     
     if config.controller_type == "predictive_sampling":
@@ -93,10 +104,15 @@ def create_controller(env, config: TrainingConfig):
         )
     elif config.controller_type == "evosax":
         import evosax
+        # Use OpenES strategy by default for Evosax controller
+        strategy = evosax.OpenES(
+            popsize=config.num_samples, 
+            num_dims=env.task.model.nu * config.num_knots
+        )
         base_ctrl = Evosax(
             env.task,
+            optimizer=strategy,
             num_samples=config.num_samples,
-            strategy=evosax.OpenES,
             **common_params,
         )
     elif config.controller_type == "mppi":
@@ -106,7 +122,6 @@ def create_controller(env, config: TrainingConfig):
             num_samples=config.num_samples,
             noise_level=config.noise_level,
             temperature=config.temperature,
-            num_randomizations=config.num_randomizations,
             **common_params,
         )
     else:
@@ -120,8 +135,7 @@ def create_network(env, config: TrainingConfig):
     # Network horizon is the number of knots (new API) not planning_horizon
     horizon = config.num_knots
     
-    # Use cost-conditioned architecture if CFG is enabled
-    if config.use_cfg:
+    if config.use_cost_conditioning:
         if config.architecture == "mlp":
             return CostConditionedMLP(
                 action_size=env.task.model.nu,
@@ -132,7 +146,7 @@ def create_network(env, config: TrainingConfig):
             )
         else:
             raise ValueError(
-                f"CFG only supports 'mlp' architecture, got '{config.architecture}'"
+                f"Cost conditioning only supports 'mlp' architecture, got '{config.architecture}'"
             )
     
     if config.architecture == "mlp":
@@ -165,11 +179,12 @@ def train_command(args):
     if len(configs) > 1:
         print_sweep_summary(configs)
         
-        # Ask for confirmation
-        response = input(f"Run all {len(configs)} experiments? [y/N]: ")
-        if response.lower() not in ['y', 'yes']:
-            print("Cancelled.")
-            return 0
+        # Ask for confirmation unless --yes is provided
+        if not getattr(args, "yes", False):
+            response = input(f"Run all {len(configs)} experiments? [y/N]: ")
+            if response.lower() not in ["y", "yes"]:
+                print("Cancelled.")
+                return 0
     
     # Run each configuration
     for config_idx, (config, suffix) in enumerate(configs, 1):
@@ -335,6 +350,11 @@ def main():
         type=str,
         default=None,
         help="Custom experiment name (default: timestamp)",
+    )
+    train_parser.add_argument(
+        "--yes", "-y",
+        action="store_true",
+        help="Skip confirmation prompts",
     )
     
     # Eval command

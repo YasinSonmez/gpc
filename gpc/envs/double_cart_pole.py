@@ -9,9 +9,13 @@ from gpc.envs import TrainingEnv
 class DoubleCartPoleEnv(TrainingEnv):
     """Training environment for the double cart-pole swingup task."""
 
-    def __init__(self, episode_length: int) -> None:
+    def __init__(self, episode_length: int, render_camera: str = -1) -> None:
         """Set up the training environment."""
-        super().__init__(task=DoubleCartPole(), episode_length=episode_length)
+        super().__init__(
+            task=DoubleCartPole(),
+            episode_length=episode_length,
+            render_camera=render_camera,
+        )
 
     def reset(self, data: mjx.Data, rng: jax.Array) -> mjx.Data:
         """Reset the simulator to start a new episode."""

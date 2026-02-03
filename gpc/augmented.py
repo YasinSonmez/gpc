@@ -1,9 +1,10 @@
-from typing import Any, Tuple
-
 import jax
 import jax.numpy as jnp
 from flax.struct import dataclass
 from hydrax.alg_base import SamplingBasedController, Trajectory
+from hydrax.task_base import Task
+from mujoco import mjx
+from typing import Callable, Any, Optional, Tuple
 
 
 @dataclass
@@ -16,6 +17,7 @@ class PACParams:
         base_params: The parameters for the base controller.
         policy_samples: Control knots sampled from the policy.
         rng: Random number generator key for domain randomization.
+        prev_elites: Previous step's elite samples for warm-starting (iCEM).
     """
 
     tk: jax.Array
@@ -23,24 +25,83 @@ class PACParams:
     base_params: Any
     policy_samples: jax.Array
     rng: jax.Array
+    prev_elites: Optional[jax.Array] = None  # (num_elites, num_knots, nu)
+    value_params: Optional[Any] = None       # Parameters for the Value function
+    value_alpha: float = 0.0                 # Weight for the terminal value function
+    target_cost: Optional[float] = None      # Target cost for CFG
+    cfg_scale: float = 1.0                   # Guidance scale for CFG
+
+
+class ValueAugmentedTask(Task):
+    """A task wrapper that adds a learned value function to the terminal cost."""
+
+    def __init__(
+        self, 
+        base_task: Task, 
+        value_fn: Callable[[mjx.Data], jax.Array], 
+        alpha: float
+    ):
+        self.base_task = base_task
+        self.value_fn = value_fn
+        self.alpha = alpha
+        
+        # Essential attributes
+        self.model = base_task.model
+        self.u_min = base_task.u_min
+        self.u_max = base_task.u_max
+        
+    def __getattr__(self, name):
+        """Delegate missing attributes to the base task."""
+        return getattr(self.base_task, name)
+
+    def running_cost(self, data: mjx.Data, u: jax.Array) -> jax.Array:
+        return self.base_task.running_cost(data, u)
+
+    def terminal_cost(self, data: mjx.Data) -> jax.Array:
+        return self.base_task.terminal_cost(data) + self.alpha * self.value_fn(data)
 
 
 class PolicyAugmentedController(SamplingBasedController):
-    """An SPC generalization where samples are augmented by a learned policy."""
+    """An SPC generalization where samples are augmented by a learned policy.
+    
+    Supports iCEM improvements:
+    - Colored noise: Temporally correlated noise for smoother actions
+    - Elite shifting: Warm-start from previous step's best samples
+    - Value Function: Optional terminal cost bootstrapping
+    """
 
     def __init__(
         self,
         base_ctrl: SamplingBasedController,
         num_policy_samples: int,
+        use_colored_noise: bool = False,
+        noise_beta: float = 2.0,
+        shift_elites_fraction: float = 0.0,
+        value_fn: Optional[Callable[[Any, mjx.Data], jax.Array]] = None,
     ) -> None:
         """Initialize the policy-augmented controller.
 
         Args:
             base_ctrl: The base controller to augment.
             num_policy_samples: The number of samples to draw from the policy.
+            use_colored_noise: Use temporally correlated noise (iCEM).
+            noise_beta: Colored noise exponent (0=white, 2+=smooth).
+            shift_elites_fraction: Fraction of elites to warm-start between steps.
+            value_fn: Optional terminal value function V(params, mjx_data).
         """
         self.base_ctrl = base_ctrl
         self.num_policy_samples = num_policy_samples
+        self.use_colored_noise = use_colored_noise
+        self.noise_beta = noise_beta
+        self.shift_elites_fraction = shift_elites_fraction
+        self.value_fn = value_fn
+        
+        # Calculate number of shifted elites
+        if hasattr(base_ctrl, 'num_elites'):
+            self.num_shift_elites = int(base_ctrl.num_elites * shift_elites_fraction)
+        else:
+            self.num_shift_elites = 0
+        
         # Pass through all parameters from base controller
         super().__init__(
             base_ctrl.task,
@@ -66,24 +127,73 @@ class PolicyAugmentedController(SamplingBasedController):
                 self.task.model.nu,
             )
         )
+        # Initialize prev_elites with zeros (needed for JAX scan compatibility)
+        if self.num_shift_elites > 0:
+            prev_elites = jnp.zeros(
+                (self.num_shift_elites, self.num_knots, self.task.model.nu)
+            )
+        else:
+            prev_elites = jnp.zeros((0, self.num_knots, self.task.model.nu))
+            
         return PACParams(
             tk=base_params.tk,
             mean=base_params.mean,
             base_params=base_params,
             policy_samples=policy_samples,
             rng=our_rng,
+            prev_elites=prev_elites,
+            value_params=None,
+            value_alpha=0.0,
         )
 
     def sample_knots(self, params: PACParams) -> Tuple[jax.Array, PACParams]:
-        """Sample control knots from the base controller and the policy."""
+        """Sample control knots from the base controller and the policy.
+        
+        Includes iCEM improvements:
+        - Colored noise for temporally correlated sampling
+        - Shifted elites from previous MPC step for warm-starting
+        """
         # Samples from the base controller
         base_samples, base_params = self.base_ctrl.sample_knots(
             params.base_params
         )
+        
+        # Apply colored noise if enabled (replace white noise with colored)
+        if self.use_colored_noise:
+            from gpc.icem import colored_noise
+            rng, noise_rng = jax.random.split(base_params.rng)
+            base_params = base_params.replace(rng=rng)
+            
+            # Generate colored noise and apply to mean
+            colored = colored_noise(
+                noise_rng, 
+                base_samples.shape, 
+                beta=self.noise_beta
+            )
+            # Get noise level from base controller if available
+            noise_level = getattr(self.base_ctrl, 'noise_level', 0.1)
+            if hasattr(self.base_ctrl, 'sigma_start'):
+                # For CEM, use current covariance
+                noise_level = getattr(base_params, 'cov', self.base_ctrl.sigma_start)
+                if hasattr(noise_level, 'mean'):
+                    noise_level = jnp.mean(noise_level)
+            base_samples = base_params.mean + noise_level * colored
 
-        # Include samples from the policy. Assumes that these have already been
-        # generated and stored in params.policy_samples.
-        samples = jnp.append(base_samples, params.policy_samples, axis=0)
+        # Add shifted elites from previous step
+        if self.num_shift_elites > 0:
+            from gpc.icem import shift_sequence
+            rng, shift_rng = jax.random.split(params.rng)
+            shifted = shift_sequence(
+                params.prev_elites[:self.num_shift_elites],
+                shift_rng,
+                noise_level=0.1,
+            )
+            # Replace some base samples with shifted elites
+            base_samples = base_samples.at[:self.num_shift_elites].set(shifted)
+            params = params.replace(rng=rng)
+
+        # Include samples from the policy (policy samples first for GPC strategy)
+        samples = jnp.append(params.policy_samples, base_samples, axis=0)
 
         return samples, params.replace(
             tk=base_params.tk,
@@ -94,13 +204,52 @@ class PolicyAugmentedController(SamplingBasedController):
     def update_params(
         self, params: PACParams, rollouts: Trajectory
     ) -> PACParams:
-        """Update the policy parameters according to the base controller."""
+        """Update the policy parameters according to the base controller.
+        
+        Also stores top elites for warm-starting the next MPC step (iCEM).
+        """
         base_params = self.base_ctrl.update_params(params.base_params, rollouts)
+        
+        # Store elites for next step if using elite shifting
+        prev_elites = params.prev_elites
+        if self.num_shift_elites > 0:
+            costs = jnp.sum(rollouts.costs, axis=1)
+            elite_indices = jnp.argsort(costs)[:self.num_shift_elites]
+            prev_elites = rollouts.knots[elite_indices]
+        
         return params.replace(
             tk=base_params.tk,
             mean=base_params.mean,
-            base_params=base_params
+            base_params=base_params,
+            prev_elites=prev_elites,
         )
+
+    def optimize(self, state: mjx.Data, params: PACParams) -> Tuple[PACParams, Trajectory]:
+        """Perform SPC optimization, potentially with a terminal value function."""
+        if self.value_fn is not None:
+            # Wrap the task with Value function logic
+            v_fn = lambda data: self.value_fn(params.value_params, data)
+            va_task = ValueAugmentedTask(self.base_ctrl.task, v_fn, params.value_alpha)
+            
+            # Temporarily replace task in controllers
+            old_base_task = self.base_ctrl.task
+            old_pac_task = self.task
+            self.base_ctrl.task = va_task
+            self.task = va_task
+            
+            try:
+                # Call base optimize (which calls sample_knots, rollout, update_params)
+                # Note: SamplingBasedController.optimize is likely implemented in hydrax
+                # We expect PAC to inherit it.
+                new_params, rollouts = super().optimize(state, params)
+            finally:
+                # Restore tasks
+                self.base_ctrl.task = old_base_task
+                self.task = old_pac_task
+                
+            return new_params, rollouts
+        else:
+            return super().optimize(state, params)
 
     def get_action(self, params: PACParams, t: float) -> jax.Array:
         """Get the action from the base controller at a given time."""

@@ -1,0 +1,74 @@
+# Gymnasium Walker Configuration
+task_name: walker_gym
+episode_length: 1000
+
+controller_type: predictive_sampling
+num_samples: 32
+noise_level: 0.5
+num_policy_samples: 16
+strategy: "best"
+
+# Planning settings
+# plan_horizon: 1.0     # Longer horizon for more stable walking
+# num_knots: 8          # More knots for complex trajectories
+# spline_type: "linear" # Smooth transition between knots
+
+architecture: mlp
+hidden_layers: [256, 256, 256]
+
+# Training
+num_iters: 25
+num_envs: 128
+learning_rate: 0.001
+batch_size: 4096
+num_epochs: 50
+exploration_noise_level: 0.0
+normalize_observations: true
+seed: 0
+
+# Cost Conditioning
+use_cost_conditioning: false
+use_cfg: false
+use_replay_buffer: true
+replay_buffer_size: 10000000       # Max buffer size
+cfg_guidance_scale: 1.1
+cfg_drop_prob: 0.2
+cost_weight_temperature: 0.0
+buffer_filtering_fraction: 1.0
+# initial_replay_buffer_path: "experiments/rl_expert/expert_buffer.pkl"
+warmstart_policy_buffer: false
+warmstart_value_buffer: false
+
+# Checkpointing & Evaluation
+checkpoint_every: 20
+num_eval_episodes: 5
+video_fps: 30
+video_quality: 10
+video_resolution: [1920, 1080]
+
+
+# Value Function Integration
+use_value_function: false
+value_learning_rate: 0.001
+iql_tau: 0.1
+discount_factor: 0.99
+value_hidden_layers: [256, 256, 256]
+polyak_tau: 0.005
+value_alpha_start: 0.0
+value_alpha_end: 0.01
+value_alpha_start_iter: 0
+value_alpha_ramp_type: "exponential"
+value_buffer_window: 100
+value_train_epochs: 5
+
+
+# Logging & Visualization
+record_training_videos: true
+num_training_videos: 1
+record_eval_videos: false
+log_verbosity: 2
+render_camera: "floating"
+
+experiment_name: walker_gym_test1
+wandb_project: gpc_final_ablations
+use_wandb: true

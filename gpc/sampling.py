@@ -67,14 +67,19 @@ class BootstrappedPredictiveSampling(PredictiveSampling):
 
         # Sample from the generative policy, which is conditioned on the latest
         # observation.
+        target_cost = getattr(params, 'target_cost', None)
+        cfg_scale = getattr(params, 'cfg_scale', 1.0)
+        
         policy_rngs = jax.random.split(policy_rng, self.num_policy_samples)
         policy_controls = jax.vmap(
-            self.policy.apply, in_axes=(None, None, 0, None)
+            self.policy.apply, in_axes=(None, None, 0, None, None, None)
         )(
             params.mean,
             y,
             policy_rngs,
             self.warm_start_level,
+            target_cost,
+            cfg_scale,
         )
 
         # Combine the random and policy samples

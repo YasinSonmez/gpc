@@ -85,6 +85,8 @@ class ExperimentManager:
         num_data_points: int,
         obs_mean: float,
         obs_std: float,
+        episode_cost: Optional[float] = None,
+        episode_cost_std: Optional[float] = None,
     ) -> None:
         """Log iteration statistics to markdown file.
         
@@ -102,6 +104,8 @@ class ExperimentManager:
             num_data_points: Total data points collected.
             obs_mean: Mean of observations.
             obs_std: Standard deviation of observations.
+            episode_cost: Mean total episode cost.
+            episode_cost_std: Standard deviation of total episode cost.
         """
         total_time = sim_time + fit_time + render_time
         
@@ -112,6 +116,11 @@ class ExperimentManager:
             f.write("### Performance\n\n")
             f.write(f"- **Policy Cost**: {policy_cost:.4f}\n")
             f.write(f"- **SPC Cost**: {spc_cost:.4f}\n")
+            if episode_cost is not None:
+                if episode_cost_std is not None:
+                    f.write(f"- **Episode Cost**: {episode_cost:.4f} ± {episode_cost_std:.4f}\n")
+                else:
+                    f.write(f"- **Episode Cost**: {episode_cost:.4f}\n")
             f.write(f"- **Policy Best**: {policy_best_frac*100:.2f}%\n")
             f.write(f"- **Training Loss**: {training_loss:.4f}\n\n")
             
@@ -244,6 +253,13 @@ class ExperimentManager:
             # Standard metrics
             print(f"  Policy Cost:      {metrics.get('policy_cost', 0):.4f}")
             print(f"  SPC Cost:         {metrics.get('spc_cost', 0):.4f}")
+            if "episode_cost" in metrics:
+                mean = metrics.get('episode_cost', 0)
+                std = metrics.get('episode_cost_std')
+                if std is not None:
+                    print(f"  Episode Cost:     {mean:.4f} ± {std:.4f}")
+                else:
+                    print(f"  Episode Cost:     {mean:.4f}")
             print(f"  Policy Best:      {metrics.get('policy_best_frac', 0)*100:.2f}%")
             print(f"  Training Loss:    {metrics.get('loss', 0):.4f}")
         

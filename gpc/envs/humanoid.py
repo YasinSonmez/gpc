@@ -9,9 +9,13 @@ from gpc.envs import TrainingEnv
 class HumanoidEnv(TrainingEnv):
     """Training environment for humanoid (Unitree G1) standup."""
 
-    def __init__(self, episode_length: int) -> None:
+    def __init__(self, episode_length: int, render_camera: str = -1) -> None:
         """Set up the walker training environment."""
-        super().__init__(task=HumanoidStandup(), episode_length=episode_length)
+        super().__init__(
+            task=HumanoidStandup(),
+            episode_length=episode_length,
+            render_camera=render_camera,
+        )
 
     def reset(self, data: mjx.Data, rng: jax.Array) -> mjx.Data:
         """Reset the simulator to start a new episode."""
@@ -46,4 +50,4 @@ class HumanoidEnv(TrainingEnv):
     @property
     def observation_size(self) -> int:
         """The size of the observations."""
-        return 56
+        return 68
