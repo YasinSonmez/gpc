@@ -1,20 +1,20 @@
 import argparse
+
 import os
 
 os.environ["MUJOCO_GL"] = "egl"
-
 import mujoco
 
 from hydrax.algs import CEM, MPPI, PredictiveSampling
 from hydrax.simulation.deterministic import run_interactive
-from hydrax.tasks.cart_pole import CartPole
+from hydrax.tasks.adroit_hammer import AdroitHammer
 
 """
 Run an interactive simulation of a cart-pole swingup
 """
 
 # Define the task (cost and dynamics)
-task = CartPole()
+task = AdroitHammer()
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(
@@ -43,7 +43,7 @@ elif args.algorithm == "mppi":
     print("Running MPPI")
     ctrl = MPPI(
         task,
-        num_samples=128,
+        num_samples=256,
         noise_level=0.3,
         temperature=0.1,
         spline_type="cubic",
@@ -78,6 +78,6 @@ run_interactive(
     fixed_camera_id=0,
     show_traces=False,
     max_traces=1,
-    record_video=True,
     render=False,
+    record_video=True,
 )
