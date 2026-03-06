@@ -1,7 +1,4 @@
 import argparse
-import os
-
-os.environ["MUJOCO_GL"] = "egl"
 
 import mujoco
 
@@ -79,5 +76,4 @@ run_interactive(
     show_traces=False,
     max_traces=1,
     record_video=True,
-    render=False,
 )

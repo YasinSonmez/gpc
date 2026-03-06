@@ -104,8 +104,8 @@
 
 
     <actuator>
-        <general name="A_ARRx" joint="ARRx" ctrlrange="-.4 .25" biastype="affine" gainprm="500 0 0" biasprm="0 -200 0" user="1002 0 2001 -0.02 0.02 0 0 0 0 0 0 0 0 0 0 0"/>
-        <general name="A_ARRy" joint="ARRy" ctrlrange="-0.3 0.3" biastype="affine" gainprm="500 0 0" biasprm="0 -200 0"/>
+        <general name="A_ARRx" joint="ARRx" ctrllimited="true" ctrlrange="-.4 .25" biastype="affine" gainprm="500 0 0" biasprm="0 -200 0" user="1002 0 2001 -0.02 0.02 0 0 0 0 0 0 0 0 0 0 0"/>
+        <general name="A_ARRy" joint="ARRy" ctrllimited="true" ctrlrange="-0.3 0.3" biastype="affine" gainprm="500 0 0" biasprm="0 -200 0"/>
     </actuator>
     <include file='adroit_assets.xml'/>
 </mujoco>

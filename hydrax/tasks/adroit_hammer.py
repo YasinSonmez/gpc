@@ -1,10 +1,9 @@
-from typing import Dict
-
 import jax
 import jax.numpy as jnp
 import mujoco
-from mujoco import mjx
 import numpy as np
+from gymnasium_robotics.utils.mujoco_utils import MujocoModelNames
+from mujoco import mjx
 
 from hydrax import ROOT
 from hydrax.task_base import Task
@@ -13,43 +12,63 @@ from hydrax.task_base import Task
 class AdroitHammer(Task):
     """Door open task for Adroit hand."""
 
-    def __init__(self) -> None:
+    def __init__(self, impl: str = "jax") -> None:
         """Load the MuJoCo model and set task parameters."""
         mj_model = mujoco.MjModel.from_xml_path(
             ROOT + "/models/adroit_hand/adroit_hammer.xml"
         )
-        super().__init__(mj_model)
+        # The default is a timestep of 0.002 and 50 ls_iterations
+        # self.frame_skip = 5 is the classic env setting
+        # self.dt = 0.01
+        # self.
 
-        # # Get sensor and site ids
-        # self.orientation_sensor_id = mj_model.sensor("imu_in_torso_quat").id
-        # self.velocity_sensor_id = mj_model.sensor("imu_in_torso_linvel").id
-        # self.torso_id = mj_model.site("imu_in_torso").id
+        self._model_names = MujocoModelNames(mj_model)
+        mj_model.actuator_gainprm[
+            self._model_names.actuator_name2id[
+                "A_WRJ1"
+            ] : self._model_names.actuator_name2id["A_WRJ0"] + 1,
+            :3,
+        ] = np.array([10, 0, 0])
+        mj_model.actuator_gainprm[
+            self._model_names.actuator_name2id[
+                "A_FFJ3"
+            ] : self._model_names.actuator_name2id["A_THJ0"] + 1,
+            :3,
+        ] = np.array([1, 0, 0])
+        mj_model.actuator_biasprm[
+            self._model_names.actuator_name2id[
+                "A_WRJ1"
+            ] : self._model_names.actuator_name2id["A_WRJ0"] + 1,
+            :3,
+        ] = np.array([0, -10, 0])
+        mj_model.actuator_biasprm[
+            self._model_names.actuator_name2id[
+                "A_FFJ3"
+            ] : self._model_names.actuator_name2id["A_THJ0"] + 1,
+            :3,
+        ] = np.array([0, -1, 0])
 
-        # # Set the target height
-        # self.target_height = 0.9
-        # change actuator sensitivity
-
-        # # Standing configuration
-        # self.qstand = jnp.array(mj_model.keyframe("stand").qpos)
-        self.grasp_site_id = mj_model.site("S_grasp").id
-        self.target_obj_site_id = mj_model.site("S_target").id
-        self.obj_body_id = mj_model.body("Object").id
-        self.tool_site_id = mj_model.site("tool").id
-        self.goal_site_id = mj_model.site("nail_goal").id
-        self.target_body_id = mj_model.body("nail_board").id
+        super().__init__(mj_model, trace_sites=["tool"], impl=impl)
 
         self.sparse_reward = False
+        self.target_obj_site_id = self._model_names.site_name2id["S_target"]
+        self.grasp_site_id = self._model_names.site_name2id["S_grasp"]
+        self.obj_body_id = self._model_names.body_name2id["Object"]
+        self.tool_site_id = self._model_names.site_name2id["tool"]
+        self.goal_site_id = self._model_names.site_name2id["nail_goal"]
+        self.target_body_id = self._model_names.body_name2id["nail_board"]
 
-    # def _get_torso_orientation(self, state: mjx.Data) -> jax.Array:
-    #     """Get the rotation from the current torso orientation to upright."""
-    #     sensor_adr = self.model.sensor_adr[self.orientation_sensor_id]
-    #     quat = state.sensordata[sensor_adr : sensor_adr + 4]
-    #     upright = jnp.array([0.0, 0.0, 1.0])
-    #     return mjx._src.math.rotate(upright, quat)
+        # self.act_mean = jnp.mean(self.model.actuator_ctrlrange, axis=1)
+        # self.act_rng = jnp.array(
+        #     0.5
+        #     * (
+        #         self.model.actuator_ctrlrange[:, 1]
+        #         - self.model.actuator_ctrlrange[:, 0]
+        #     )
+        # )
 
     def running_cost(self, state: mjx.Data, control: jax.Array) -> jax.Array:
         """The running cost ℓ(xₜ, uₜ)."""
-
         hamm_pos = state.xpos[self.obj_body_id].ravel()
         palm_pos = state.site_xpos[self.grasp_site_id].ravel()
         head_pos = state.site_xpos[self.tool_site_id].ravel()
@@ -84,6 +103,7 @@ class AdroitHammer(Task):
         """The terminal cost ϕ(x_T)."""
         return self.running_cost(state, jnp.zeros(self.model.nu))
 
+    # TODO: This is where moving the board goes...
     # def domain_randomize_model(self, rng: jax.Array) -> Dict[str, jax.Array]:
     #     """Randomize the friction parameters."""
     #     n_geoms = self.model.geom_friction.shape[0]
@@ -105,3 +125,7 @@ class AdroitHammer(Task):
     #     qvel = data.qvel.at[0:6].set(data.qvel[0:6] + v_err)
 
     #     return {"qpos": qpos, "qvel": qvel}
+
+    def make_data(self) -> mjx.Data:
+        """Create a new state object with extra constraints allocated."""
+        return super().make_data(naconmax=10000, njmax=200)
