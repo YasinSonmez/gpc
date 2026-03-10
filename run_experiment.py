@@ -14,6 +14,9 @@ import argparse
 import sys
 from pathlib import Path
 
+import jax
+import jax.numpy as jnp
+
 # Import gpc first for CUDA setup
 import gpc  # noqa: F401
 
@@ -30,13 +33,14 @@ from gpc.envs import (
     DoubleCartPoleEnv,
     HumanoidEnv,
     HumanoidMocapEnv,
-    HumanoidMocapEnv,
-    HumanoidBraxEnv,
     ParticleEnv,
     PendulumEnv,
     PushTEnv,
     WalkerEnv,
     WalkerGymEnv,
+    AntGymEnv,
+    HumanoidGymEnv,
+    HalfCheetahGymEnv,
 )
 from gpc.experiment import ExperimentManager
 from gpc.policy import Policy
@@ -56,8 +60,11 @@ TASK_ENVS = {
     "crane": CraneEnv,
     "humanoid": HumanoidEnv,
     "humanoid_mocap": HumanoidMocapEnv,
-    "humanoid_brax": HumanoidBraxEnv,
     "pusht": PushTEnv,
+    "pusht": PushTEnv,
+    "ant_gym": AntGymEnv,
+    "humanoid_gym": HumanoidGymEnv,
+    "half_cheetah_gym": HalfCheetahGymEnv,
 }
 
 
@@ -70,10 +77,20 @@ def create_environment(config: TrainingConfig):
         )
     
     env_class = TASK_ENVS[config.task_name]
-    return env_class(
-        episode_length=config.episode_length,
-        render_camera=config.render_camera
-    )
+    
+    # Handle environment-specific arguments
+    kwargs = {
+        "episode_length": config.episode_length,
+        "render_camera": config.render_camera,
+        "render_resolution": config.video_resolution,
+    }
+    
+    if config.task_name in ("ant_gym", "humanoid_gym", "half_cheetah_gym"):
+        if hasattr(config, 'terminate_when_unhealthy'):
+            kwargs["terminate_when_unhealthy"] = config.terminate_when_unhealthy
+        kwargs["sim_steps_per_control_step"] = config.action_repeat
+        
+    return env_class(**kwargs)
 
 
 def create_controller(env, config: TrainingConfig):
@@ -84,6 +101,7 @@ def create_controller(env, config: TrainingConfig):
         "spline_type": config.spline_type,
         "num_knots": config.num_knots,
         "num_randomizations": config.num_randomizations,
+        "iterations": config.iterations,
     }
     
     if config.controller_type == "predictive_sampling":
@@ -104,17 +122,29 @@ def create_controller(env, config: TrainingConfig):
         )
     elif config.controller_type == "evosax":
         import evosax
-        # Use OpenES strategy by default for Evosax controller
-        strategy = evosax.OpenES(
-            popsize=config.num_samples, 
-            num_dims=env.task.model.nu * config.num_knots
-        )
+        import evosax.algorithms
+        # Try to find strategy in evosax.algorithms
+        strategy_name = config.evosax_strategy
+        # Map common names to evosax names
+        if strategy_name == "OpenES":
+            strategy_name = "Open_ES"
+            
+        strategy_class = getattr(evosax.algorithms, strategy_name, evosax.algorithms.CMA_ES)
+            
         base_ctrl = Evosax(
             env.task,
-            optimizer=strategy,
+            optimizer=strategy_class,
             num_samples=config.num_samples,
             **common_params,
         )
+        base_ctrl.num_samples = config.num_samples
+        
+        # Support sigma_start for evosax via es_params
+        if config.sigma_start is not None:
+            if hasattr(base_ctrl.es_params, "std_init"):
+                base_ctrl.es_params = base_ctrl.es_params.replace(std_init=config.sigma_start)
+            elif hasattr(base_ctrl.es_params, "sigma_init"):
+                base_ctrl.es_params = base_ctrl.es_params.replace(sigma_init=config.sigma_start)
     elif config.controller_type == "mppi":
         from hydrax.algs import MPPI
         base_ctrl = MPPI(
@@ -127,7 +157,11 @@ def create_controller(env, config: TrainingConfig):
     else:
         raise ValueError(f"Unknown controller type: {config.controller_type}")
     
-    return PolicyAugmentedController(base_ctrl, config.num_policy_samples)
+    return PolicyAugmentedController(
+        base_ctrl,
+        config.num_policy_samples,
+        exploration_floor=config.exploration_floor,
+    )
 
 
 def create_network(env, config: TrainingConfig):
@@ -156,6 +190,7 @@ def create_network(env, config: TrainingConfig):
             horizon=horizon,
             hidden_layers=config.hidden_layers,
             rngs=nnx.Rngs(0),
+            dropout_rate=config.inference_dropout_rate if config.inference_dropout else 0.0,
         )
     elif config.architecture == "cnn":
         return DenoisingCNN(
