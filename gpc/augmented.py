@@ -39,11 +39,13 @@ class ValueAugmentedTask(Task):
         self, 
         base_task: Task, 
         value_fn: Callable[[mjx.Data], jax.Array], 
-        alpha: float
+        alpha: float,
+        use_base_terminal_cost: bool = True,
     ):
         self.base_task = base_task
         self.value_fn = value_fn
         self.alpha = alpha
+        self.use_base_terminal_cost = use_base_terminal_cost
         
         # Essential attributes
         self.model = base_task.model
@@ -58,7 +60,10 @@ class ValueAugmentedTask(Task):
         return self.base_task.running_cost(data, u)
 
     def terminal_cost(self, data: mjx.Data) -> jax.Array:
-        return self.base_task.terminal_cost(data) + self.alpha * self.value_fn(data)
+        term_cost = self.alpha * self.value_fn(data)
+        if self.use_base_terminal_cost:
+            term_cost = term_cost + self.base_task.terminal_cost(data)
+        return term_cost
 
 
 class PolicyAugmentedController(SamplingBasedController):
@@ -78,6 +83,8 @@ class PolicyAugmentedController(SamplingBasedController):
         noise_beta: float = 2.0,
         shift_elites_fraction: float = 0.0,
         value_fn: Optional[Callable[[Any, mjx.Data], jax.Array]] = None,
+        use_task_terminal_cost: bool = True,
+        exploration_floor: float = 0.0,
     ) -> None:
         """Initialize the policy-augmented controller.
 
@@ -88,6 +95,9 @@ class PolicyAugmentedController(SamplingBasedController):
             noise_beta: Colored noise exponent (0=white, 2+=smooth).
             shift_elites_fraction: Fraction of elites to warm-start between steps.
             value_fn: Optional terminal value function V(params, mjx_data).
+            exploration_floor: Fraction of the base SPC sample budget (num_samples)
+                replaced with Uniform[-1, 1] random knots each step (Solution 1).
+                0.0 (default) preserves the original behaviour.
         """
         self.base_ctrl = base_ctrl
         self.num_policy_samples = num_policy_samples
@@ -95,6 +105,9 @@ class PolicyAugmentedController(SamplingBasedController):
         self.noise_beta = noise_beta
         self.shift_elites_fraction = shift_elites_fraction
         self.value_fn = value_fn
+        self.use_task_terminal_cost = use_task_terminal_cost
+        # Number of base samples replaced with Uniform[-1,1] wide noise (Solution 1).
+        self.n_wide: int = max(0, int(base_ctrl.num_samples * exploration_floor))
         
         # Calculate number of shifted elites
         if hasattr(base_ctrl, 'num_elites'):
@@ -192,6 +205,21 @@ class PolicyAugmentedController(SamplingBasedController):
             base_samples = base_samples.at[:self.num_shift_elites].set(shifted)
             params = params.replace(rng=rng)
 
+        # Replace the last n_wide base samples with Uniform[-1, 1] wide-exploration
+        # seeds (Solution 1 – Stratified SPC).  These are independent of both the
+        # policy and the SPC mean, guaranteeing a non-vanishing probability of
+        # discovering any mode every step.
+        if self.n_wide > 0:
+            rng, wide_rng = jax.random.split(params.rng)
+            wide_samples = jax.random.uniform(
+                wide_rng,
+                (self.n_wide, self.num_knots, self.task.model.nu),
+                minval=-1.0,
+                maxval=1.0,
+            )
+            base_samples = base_samples.at[-self.n_wide :].set(wide_samples)
+            params = params.replace(rng=rng)
+
         # Include samples from the policy (policy samples first for GPC strategy)
         samples = jnp.append(params.policy_samples, base_samples, axis=0)
 
@@ -229,7 +257,12 @@ class PolicyAugmentedController(SamplingBasedController):
         if self.value_fn is not None:
             # Wrap the task with Value function logic
             v_fn = lambda data: self.value_fn(params.value_params, data)
-            va_task = ValueAugmentedTask(self.base_ctrl.task, v_fn, params.value_alpha)
+            va_task = ValueAugmentedTask(
+                self.base_ctrl.task, 
+                v_fn, 
+                params.value_alpha,
+                use_base_terminal_cost=self.use_task_terminal_cost
+            )
             
             # Temporarily replace task in controllers
             old_base_task = self.base_ctrl.task

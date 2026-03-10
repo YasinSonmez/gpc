@@ -205,8 +205,8 @@ class ExperimentManager:
         if frames.dtype != np.uint8:
             frames = (frames * 255).astype(np.uint8)
         
-        # Resize if resolution specified
-        if resolution is not None:
+        # Resize if resolution specified (now deprecated in favor of native rendering)
+        if resolution is not None and (frames.shape[1] != resolution[1] or frames.shape[2] != resolution[0]):
             from PIL import Image
             resized_frames = []
             for frame in frames:
@@ -221,9 +221,10 @@ class ExperimentManager:
             frames,
             fps=fps,
             codec="libx264",
-            quality=quality,
+            quality=5, # imageio internal quality (1-10)
             pixelformat="yuv420p",
-            output_params=["-crf", str(quality)],
+            macro_block_size=1, # Allow non-even dimensions
+            output_params=["-crf", str(quality), "-preset", "veryfast"],
         )
     
     def log_iteration_summary(

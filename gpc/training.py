@@ -31,6 +31,7 @@ def simulate_episode(
     cfg_scale: float = 1.0,
     value_params: Optional[Any] = None,
     value_alpha: float = 0.0,
+    policy_weight: jax.Array = 1.0,
 ) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, SimulatorState]:
     """Starting from a random initial state, run SPC and record training data.
 
@@ -45,6 +46,10 @@ def simulate_episode(
                   first policy sample, while "best" agregates all samples.
         target_cost: Target normalized cost for CFG.
         cfg_scale: Guidance scale (w) for CFG.
+        policy_weight: Scalar in [0, 1].  When < 1, the policy proposals are
+            linearly blended with Uniform[u_min, u_max] random sequences
+            (Solution 4 — DAgger ramp-up schedule).  At 0 the controller
+            receives only random seeds; at 1 (default) pure policy proposals.
 
     Returns:
         y: The observations at each time step.
@@ -80,6 +85,18 @@ def simulate_episode(
             U, y, policy_rngs, warm_start_level, target_cost, cfg_scale
         )
 
+        # DAgger ramp-up (Solution 4): blend policy proposals with uniform random
+        # seeds according to policy_weight.  At policy_weight=1 behaviour is
+        # unchanged; at 0 proposals are purely random (full SPC exploration).
+        rng, blend_rng = jax.random.split(rng)
+        blend_noise = jax.random.uniform(
+            blend_rng,
+            Us.shape,
+            minval=policy.u_min,
+            maxval=policy.u_max,
+        )
+        Us = policy_weight * Us + (1.0 - policy_weight) * blend_noise
+
         psi = psi.replace(
             policy_samples=Us, base_params=psi.base_params.replace(rng=rng)
         )
@@ -89,13 +106,20 @@ def simulate_episode(
         U_star_knots = psi.mean
 
         costs = jnp.sum(rollouts.costs, axis=1)
-        policy_best_idx = jnp.argmin(costs[: ctrl.num_policy_samples])
+        
+        # Safely handle policy_best when num_policy_samples=0
+        # Use where to avoid argmin of empty sequence by using full costs array
+        # masked with infinity where not a policy sample.
+        mask = jnp.arange(costs.shape[0]) < ctrl.num_policy_samples
+        masked_costs = jnp.where(mask, costs, jnp.inf)
+        policy_best_idx = jnp.argmin(masked_costs)
+        policy_best = jnp.where(ctrl.num_policy_samples > 0, costs[policy_best_idx], jnp.inf)
+
         spc_best_idx = (
             jnp.argmin(costs[ctrl.num_policy_samples :])
             + ctrl.num_policy_samples
         )
         spc_best = costs[spc_best_idx]
-        policy_best = costs[policy_best_idx]
 
         if strategy == "policy":
             u = Us[0, 0]
@@ -109,10 +133,11 @@ def simulate_episode(
         u_taken = u + exploration_noise
         x = env.step(x, u_taken)
 
-        # Calculate instantaneous cost (true cost at current step)
-        J_inst = env.task.running_cost(x.data, u)
+        # Calculate integrated cost for this control step (sum over integration steps)
+        # This uses the running_cost stored in SimulatorState by env.step()
+        instant_cost = x.running_cost
 
-        return (x, Us, psi), (y, U_star_knots, U_guess, spc_best, policy_best, J_inst, u_taken, x)
+        return (x, Us, psi), (y, U_star_knots, U_guess, spc_best, policy_best, instant_cost, u_taken, x)
 
     rng, u_rng = jax.random.split(rng)
     U = jax.random.normal(

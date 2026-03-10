@@ -19,11 +19,15 @@ class ReplayBuffer:
         observation_size: int,
         action_size: int,
         horizon: int,
+        plan_horizon: float = 0.75,
+        control_dt: float = 0.01,
     ):
         self.capacity = capacity
         self.observation_size = observation_size
         self.action_size = action_size
         self.horizon = horizon
+        self.plan_horizon = plan_horizon
+        self.control_dt = control_dt
 
         # Single-step transition data
         self.obs = np.zeros((capacity, observation_size), dtype=np.float32)
@@ -108,6 +112,48 @@ class ReplayBuffer:
             if u_sequences is not None: u_sequences = u_sequences[start:]
             if u_prev_sequences is not None: u_prev_sequences = u_prev_sequences[start:]
             num_transitions = self.capacity
+
+        def _reconstruct_knots(single_actions, dones, target_knots, plan_horizon, control_dt):
+            """Reconstruct knot sequences from raw transitions using vectorized sampling."""
+            num_trans = single_actions.shape[0]
+            nu = single_actions.shape[1]
+            
+            # Number of simulation steps in the horizon
+            horizon_steps = int(round(plan_horizon / control_dt))
+            
+            # Knot indices (relative)
+            knot_offsets = np.linspace(0, horizon_steps, target_knots, endpoint=True).astype(np.int32)
+            
+            # Indices to sample: (num_transitions, target_knots)
+            indices = np.arange(num_trans)[:, None] + knot_offsets[None, :]
+            
+            # Handle episode boundaries (dones)
+            done_indices = np.where(dones)[0]
+            if len(done_indices) > 0:
+                # Find next done for each index
+                next_done_ptr = np.searchsorted(done_indices, np.arange(num_trans))
+                next_done_idx = np.where(next_done_ptr < len(done_indices), done_indices[next_done_ptr], num_trans - 1)
+                # Clip sampled indices to the next done index
+                indices = np.minimum(indices, next_done_idx[:, None])
+            
+            # Also clip to absolute buffer end
+            indices = np.minimum(indices, num_trans - 1)
+            
+            # Sample and return
+            return single_actions[indices]
+
+        # Check for knot mismatch and reconstruct if possible
+        if u_sequences is not None and u_sequences.shape[1] != self.horizon:
+            # We need plan_horizon and control_dt to reconstruct.
+            # Try to get them from kwargs or default to common values for Ant
+            plan_horiz = getattr(self, 'plan_horizon', 0.75)
+            ctrl_dt = getattr(self, 'control_dt', 0.01)
+            
+            print(f"  Note: u_sequences knot mismatch ({u_sequences.shape[1]} != {self.horizon}).")
+            print(f"  Attempting reconstruction from single_actions (horizon={plan_horiz}s, dt={ctrl_dt}s)...")
+            u_sequences = _reconstruct_knots(action, done, self.horizon, plan_horiz, ctrl_dt)
+            # Match u_prev_sequences to the new knots to maintain consistency
+            u_prev_sequences = u_sequences.copy()
 
         # Compute returns-to-go
         returns = np.zeros(num_transitions, dtype=np.float32)
@@ -309,6 +355,8 @@ class ReplayBuffer:
             'observation_size': self.observation_size,
             'action_size': self.action_size,
             'horizon': self.horizon,
+            'plan_horizon': self.plan_horizon,
+            'control_dt': self.control_dt,
         }
         with open(path, 'wb') as f:
             pickle.dump(data, f)
@@ -323,8 +371,10 @@ class ReplayBuffer:
         obs_size = meta.get('observation_size', data['observations'].shape[-1])
         act_size = meta.get('action_size', data['single_actions'].shape[-1] if 'single_actions' in data else data['actions'].shape[-1])
         horizon = meta.get('horizon', data['actions'].shape[-2] if data['actions'].ndim == 3 else 1)
+        plan_horizon = meta.get('plan_horizon', 0.75)
+        control_dt = meta.get('control_dt', 0.01)
         
-        buffer = cls(capacity, obs_size, act_size, horizon)
+        buffer = cls(capacity, obs_size, act_size, horizon, plan_horizon=plan_horizon, control_dt=control_dt)
         
         # Load data. Key mapping for compatibility.
         obs = data['observations']

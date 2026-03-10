@@ -13,16 +13,23 @@ class TrainingConfig:
     # Environment settings
     task_name: str = "cart_pole"
     episode_length: int = 200
+    action_repeat: int = 1  # Number of simulation steps per control step
+    terminate_when_unhealthy: bool = False  # Early termination if agent falls (e.g. Ant)
     
     # Controller settings
     controller_type: str = "predictive_sampling"  # or "evosax", "mppi", "cem"
     num_samples: int = 8
+    iterations: int = 1  # Number of optimization iterations per control step
     noise_level: float = 0.1
+    noise_level_start: Optional[float] = None
+    noise_level_end: Optional[float] = None
     num_policy_samples: int = 2
     num_latent_samples: int = 0  # Number of latent space samples (0=disabled)
     latent_noise_level: float = 1.0  # Noise level for latent sampling
     temperature: float = 0.1  # For MPPI controller
     num_randomizations: int = 1  # Domain randomizations
+    # Evosax-specific settings
+    evosax_strategy: str = "CMA_ES"  # evosax strategy name (e.g. CMA_ES, Sep_CMA_ES, OpenES)
     # CEM-specific parameters
     num_elites: int = 2  # For CEM controller
     sigma_start: float = 1.0  # For CEM controller
@@ -58,6 +65,7 @@ class TrainingConfig:
     use_replay_buffer: bool = False  # Retain all historical data (True) or clear each iter (False)
     replay_buffer_size: int = 500_000  # Maximum replay buffer size
     buffer_filtering_fraction: float = 0.0  # Fraction of expert return to keep (0 = disable)
+    buffer_filtering_mode: str = "fraction"  # "fraction" (top X%), "mean" (better than buffer mean), "expert" (better than expert fraction)
     initial_replay_buffer_path: Optional[str] = None
     warmstart_policy_buffer: bool = False
     warmstart_value_buffer: bool = False
@@ -81,6 +89,7 @@ class TrainingConfig:
     experiment_name: Optional[str] = None
     log_verbosity: int = 1  # 0=minimal, 1=normal, 2=verbose
     strategy: str = "policy"  # "policy" or "best" for simulation advancement
+    save_spc_data: bool = False  # Custom flag for saving training data as .npz
     
     # Value Function Integration
     use_value_function: bool = False
@@ -92,7 +101,21 @@ class TrainingConfig:
     value_alpha_start: float = 0.0
     value_alpha_end: float = 0.1
     value_alpha_start_iter: int = 0
+    value_alpha_start_iter: int = 0
     value_alpha_ramp_type: str = "linear"
+    use_task_terminal_cost: bool = True  # Add task heuristic terminal cost to value function
+
+    # ── Anti-collapse diversity options ──────────────────────────────────────
+    # Solution 1 (Stratified SPC) + Solution 4 (DAgger Schedule) — unified
+    exploration_floor: float = 0.0      # Fraction of SPC's N samples replaced with Uniform[-1,1] noise.
+                                        #   e.g. 0.2 → 20% of num_samples are wide-random seeds every step.
+    policy_rampup_iters: int = 0        # Ramp policy contribution 0→full over this many iters.
+                                        #   0 (default) = always use full num_policy_samples.
+    # Solution 6 (Dropout Regularisation against mode memorisation)
+    # Dropout is active during training only (disabled at inference to stay compatible
+    # with jax.lax.while_loop).  It prevents the MLP from memorising a single mode.
+    inference_dropout: bool = False     # Enable dropout in DenoisingMLP (training-time regularisation).
+    inference_dropout_rate: float = 0.1 # Dropout probability when inference_dropout=True (DenoisingMLP only).
     value_buffer_window: int = 0  # Number of recent iterations to keep in buffer (0 = keep all)
     value_train_epochs: int = 4
     

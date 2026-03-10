@@ -39,6 +39,12 @@ class DenoisingMLP(nnx.Module):
 
     Computes U* = NNet(U, y, t), where U is the noisy action sequence, y is the
     initial observation, and t is the time step in the denoising process.
+
+    Supports optional dropout between hidden layers (see ``dropout_rate``).
+    Dropout is active during training (``use_running_average=False``) and
+    disabled during inference (``use_running_average=True``), matching the
+    behaviour of the CNN's ``ConditionalResidualBlock``.  This regularises
+    against single-mode memorisation (Solution 6 as training regularisation).
     """
 
     def __init__(
@@ -48,6 +54,7 @@ class DenoisingMLP(nnx.Module):
         horizon: int,
         hidden_layers: Sequence[int],
         rngs: nnx.Rngs,
+        dropout_rate: float = 0.0,
     ):
         """Initialize the network.
 
@@ -57,24 +64,55 @@ class DenoisingMLP(nnx.Module):
             horizon: Number of steps in the action sequence (U = [u0, u1, ...]).
             hidden_layers: Sizes of all hidden layers.
             rngs: Random number generators for initialization.
+            dropout_rate: Dropout probability applied after each hidden-layer
+                activation.  0.0 (default) disables dropout entirely and
+                preserves the original behaviour.
         """
         self.action_size = action_size
         self.observation_size = observation_size
         self.horizon = horizon
-        self.hidden_layers = hidden_layers
+        self.hidden_layers = list(hidden_layers)
 
         input_size = horizon * action_size + observation_size + 1
         output_size = horizon * action_size
-        self.mlp = MLP(
-            [input_size] + list(hidden_layers) + [output_size], rngs=rngs
-        )
+        all_sizes = [input_size] + self.hidden_layers + [output_size]
+        self.num_hidden = len(all_sizes) - 2
+
+        # Store each linear layer as a named attribute (mirrors MLP layout).
+        for i, (inp, out) in enumerate(zip(all_sizes[:-1], all_sizes[1:])):
+            setattr(self, f"l{i}", nnx.Linear(inp, out, rngs=rngs))
+
+        # Optional dropout applied after each hidden-layer activation.
+        self.dropout = nnx.Dropout(rate=dropout_rate, rngs=rngs) if dropout_rate > 0.0 else None
 
     def __call__(self, u: jax.Array, y: jax.Array, t: jax.Array, use_running_average: bool = True) -> jax.Array:
-        """Forward pass through the network."""
+        """Forward pass through the network.
+
+        Args:
+            u: Noisy action sequence, shape ``(..., horizon, action_size)``.
+            y: Observation, shape ``(..., observation_size)``.
+            t: Flow time scalar or shape ``(..., 1)``.
+            use_running_average: When ``False``, dropout is stochastic
+                (training / inference-ensemble mode).  When ``True``
+                (default), dropout is deterministic / disabled.
+        """
         batches = u.shape[:-2]
         u_flat = u.reshape(batches + (self.horizon * self.action_size,))
         x = jnp.concatenate([u_flat, y, t], axis=-1)
-        x = self.mlp(x)
+
+        # Hidden layers with swish activation and optional dropout.
+        for i in range(self.num_hidden):
+            x = getattr(self, f"l{i}")(x)
+            x = nnx.swish(x)
+            if self.dropout is not None:
+                # Stochastic during training (use_running_average=False),
+                # disabled during inference (use_running_average=True).
+                # This avoids NNX stateful-RNG conflicts inside jax.lax.while_loop.
+                # Training-time dropout regularizes against single-mode memorisation.
+                x = self.dropout(x, deterministic=use_running_average)
+
+        # Final linear projection (no activation, no dropout).
+        x = getattr(self, f"l{self.num_hidden}")(x)
         return x.reshape(batches + (self.horizon, self.action_size))
 
 
@@ -93,19 +131,22 @@ class PositionalEmbedding(nnx.Module):
         """Compute the positional embedding.
         
         Args:
-            t: Time values, shape (...,) - will be squeezed and expanded
+            t: Time values, shape (...,) or (..., 1)
             
         Returns:
             Embedding of shape (..., dim)
         """
-        # Handle both scalar and array inputs
-        t_squeezed = jnp.squeeze(t)
-        if t_squeezed.ndim == 0:
-            t_squeezed = t_squeezed[None]
-        
         freqs = jnp.arange(1, self.half_dim + 1) * jnp.pi
-        emb = freqs[None, :] * t_squeezed[..., None]  # (..., half_dim)
-        emb = jnp.concatenate([jnp.sin(emb), jnp.cos(emb)], axis=-1)
+        
+        # Handle (..., 1) by squeezing the last dimension
+        t_input = jnp.array(t)
+        if t_input.ndim > 0 and t_input.shape[-1] == 1:
+            t_input = jnp.squeeze(t_input, axis=-1)
+            
+        # (...,) -> (..., half_dim)
+        # Use broadcasting to handle both scalar and batched inputs
+        args = t_input[..., None] * freqs
+        emb = jnp.concatenate([jnp.sin(args), jnp.cos(args)], axis=-1)
         return emb
 
 
@@ -236,11 +277,11 @@ class ConditionalResidualBlock(nnx.Module):
             rngs=rngs,
         )
 
-    def __call__(self, x: jax.Array, y: jax.Array) -> jax.Array:
+    def __call__(self, x: jax.Array, y: jax.Array, use_running_average: bool = True) -> jax.Array:
         """Forward pass through the block."""
         z = self.encoder(x)
         z += self.linear(y)
-        z = self.dropout(z)  # Dropout always applied (can be disabled via rate=0)
+        z = self.dropout(z, deterministic=use_running_average)
         z = self.decoder(z)
         return z + self.residual(x)
 
@@ -383,7 +424,7 @@ class DenoisingCNN(nnx.Module):
                 # x: (batch, horizon, features), cond: (batch, 1, cond_dim)
                 # FiLM expects (batch, cond_dim) so we squeeze the middle dimension
                 cond_squeezed = jnp.squeeze(cond, axis=1)  # (batch, cond_dim)
-                x = getattr(self, f"down{i}")(x, cond_squeezed)
+                x = getattr(self, f"down{i}")(x, cond_squeezed, use_running_average=use_running_average)
                 skips.append(x)
                 actual_depth += 1
                 # Downsample in time dimension only if we have enough length
@@ -407,7 +448,7 @@ class DenoisingCNN(nnx.Module):
                 x = jnp.concatenate([x, skips[skip_idx]], axis=-1)
                 # Broadcast cond for FiLM
                 cond_squeezed = jnp.squeeze(cond, axis=1)  # (batch, cond_dim)
-                x = getattr(self, f"up{i}")(x, cond_squeezed)
+                x = getattr(self, f"up{i}")(x, cond_squeezed, use_running_average=use_running_average)
 
             out = self.final(x)
             assert out.shape[-2:] == (self.horizon, self.action_size), \
@@ -466,8 +507,8 @@ class DenoisingCNN(nnx.Module):
         emb = self.positional_embedding(t)
         y = jnp.concatenate([y, emb], axis=-1)
 
-        x = self.l0(u, y)
+        x = self.l0(u, y, use_running_average=use_running_average)
         for i in range(1, self.num_layers):
-            x = getattr(self, f"l{i}")(x, y)
+            x = getattr(self, f"l{i}")(x, y, use_running_average=use_running_average)
 
         return x + u
