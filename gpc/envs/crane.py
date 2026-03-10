@@ -9,12 +9,13 @@ from gpc.envs import TrainingEnv
 class CraneEnv(TrainingEnv):
     """Training environment for the luffing crane end-effetor tracking task."""
 
-    def __init__(self, episode_length: int = 100, render_camera: str = -1) -> None:
+    def __init__(self, episode_length: int = 100, render_camera: str = -1, **kwargs) -> None:
         """Set up the particle training environment."""
         super().__init__(
             task=Crane(),
             episode_length=episode_length,
             render_camera=render_camera,
+            **kwargs
         )
 
     def reset(self, data: mjx.Data, rng: jax.Array) -> mjx.Data:

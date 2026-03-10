@@ -9,13 +9,14 @@ from gpc.envs.tasks.walker_gym import WalkerGym
 class WalkerGymEnv(TrainingEnv):
     """Training environment for the walker task with Gymnasium rewards."""
 
-    def __init__(self, episode_length: int, render_camera: str = -1) -> None:
+    def __init__(self, episode_length: int, render_camera: str = -1, **kwargs) -> None:
         """Set up the walker training environment."""
         super().__init__(
             task=WalkerGym(),
             episode_length=episode_length,
             sim_steps_per_control_step=1,
             render_camera=render_camera,
+            **kwargs
         )
 
     def reset(self, data: mjx.Data, rng: jax.Array) -> mjx.Data:
