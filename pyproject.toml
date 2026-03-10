@@ -14,22 +14,23 @@ classifiers = [
     "Programming Language :: Python",
 ]
 dependencies = [
-    "hydrax@git+https://github.com/vincekurtz/hydrax@v0.0.1",
-    "jax[cuda12]==0.4.35",
-    "flax==0.10.0",
+    "hydrax@git+https://github.com/Beau-Coup/hydrax.git",
+    "jax[cuda12]>=0.4.35",
+    "flax>=0.10.0",
     "pytest==8.3.3",
-    "ruff==0.7.1",
+    "ruff>=0.7.1",
     "pre-commit==4.0.1",
     "matplotlib==3.9.2",
-    "mujoco==3.2.4",
-    "mujoco-mjx==3.2.4",
-    "evosax==0.1.6",
-    "optax==0.2.3",
-    "tensorboard==2.18.0",
-    "tensorboardX==2.6.2",
+    "mujoco>=3.2.4",
+    "mujoco-mjx>=3.2.4",
+    "evosax>=0.1.6",
+    "optax>=0.2.3",
+    "tensorboard>=2.18.0",
+    "tensorboardX>=2.6.2",
     "cloudpickle==3.1.0",
     "moviepy==1.0.3",
     "imageio==2.27",
+    "warp-lang>=1.10.1"
 ]
 
 [tool.ruff]

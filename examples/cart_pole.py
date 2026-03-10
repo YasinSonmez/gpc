@@ -81,7 +81,7 @@ if __name__ == "__main__":
         net = DenoisingMLP(
             action_size=env.task.model.nu,
             observation_size=env.observation_size,
-            horizon=env.task.planning_horizon,
+            horizon=env.planning_horizon,
             hidden_layers=[64, 64],
             rngs=nnx.Rngs(0),
         )

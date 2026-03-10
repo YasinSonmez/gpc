@@ -302,6 +302,8 @@ def train(  # noqa: PLR0915 this is a long function, don't limit to 50 lines
     num_videos: int = 2,
     video_fps: int = 10,
     strategy: str = "policy",
+    use_value_function=False,
+          use_replay_buffer=False,
 ) -> None:
     """Train a generative predictive controller.
 
@@ -342,7 +344,7 @@ def train(  # noqa: PLR0915 this is a long function, don't limit to 50 lines
 
     # Print some information about the training setup
     episode_seconds = env.episode_length * env.task.model.opt.timestep
-    horizon_seconds = env.task.planning_horizon * env.task.dt
+    horizon_seconds = env.planning_horizon * env.task.dt
     num_samples = num_policy_samples + ctrl.num_samples
     print("Training with:")
     print(
@@ -352,7 +354,7 @@ def train(  # noqa: PLR0915 this is a long function, don't limit to 50 lines
     (
         print(
             f"  planning horizon: {horizon_seconds} seconds"
-            f" ({env.task.planning_horizon} knots)"
+            f" ({env.planning_horizon} knots)"
         ),
     )
     print(
@@ -411,7 +413,7 @@ def train(  # noqa: PLR0915 this is a long function, don't limit to 50 lines
             capacity=replay_buffer_size,
             observation_size=env.observation_size,
             action_size=env.task.model.nu,
-            horizon=env.task.planning_horizon,
+            horizon=env.planning_horizon,
         )
 
     # Set up the TensorBoard logger
@@ -491,9 +493,9 @@ def train(  # noqa: PLR0915 this is a long function, don't limit to 50 lines
         """
         # Flatten across timesteps and initial conditions
         y = observations.reshape(-1, observations.shape[-1])
-        U = actions.reshape(-1, env.task.planning_horizon, env.task.model.nu)
+        U = actions.reshape(-1, env.planning_horizon, env.task.model.nu)
         U_guess = previous_actions.reshape(
-            -1, env.task.planning_horizon, env.task.model.nu
+            -1, env.planning_horizon, env.task.model.nu
         )
 
         # Rescale the actions from [u_min, u_max] to [-1, 1]
@@ -611,7 +613,7 @@ def train(  # noqa: PLR0915 this is a long function, don't limit to 50 lines
             v_fit_start = time.time()
             v_losses = []
             # Plan horizon n for TD(n)
-            n_step = env.task.planning_horizon
+            n_step = env.planning_horizon
             
             # Fit for several epochs
             num_batches = max(1, replay_buffer.size // batch_size)

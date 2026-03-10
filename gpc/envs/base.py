@@ -31,6 +31,7 @@ class TrainingEnv(ABC):
     def __init__(
         self,
         task: Task,
+        planning_horizon: int,
         episode_length: int,
         sim_steps_per_control_step: int = 1,
         render_camera: str = -1,
@@ -45,6 +46,7 @@ class TrainingEnv(ABC):
             render_camera: Camera name or ID for rendering.
         """
         self.task = task
+        self.planning_horizon = planning_horizon
         self.episode_length = episode_length
         self.sim_steps_per_control_step = sim_steps_per_control_step
         self.render_camera = render_camera if render_camera is not None else -1

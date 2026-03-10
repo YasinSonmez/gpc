@@ -13,6 +13,7 @@ class CartPoleEnv(TrainingEnv):
         """Set up the cartpole training environment."""
         super().__init__(
             task=CartPole(),
+            planning_horizon=10,
             episode_length=episode_length,
             render_camera=render_camera,
         )
