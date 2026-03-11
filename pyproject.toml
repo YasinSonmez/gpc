@@ -30,7 +30,8 @@ dependencies = [
     "cloudpickle==3.1.0",
     "moviepy==1.0.3",
     "imageio==2.27",
-    "warp-lang>=1.10.1"
+    "warp-lang>=1.10.1",
+    "wandb>=0.25.1",
 ]
 
 [tool.ruff]

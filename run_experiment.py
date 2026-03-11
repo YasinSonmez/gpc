@@ -7,47 +7,45 @@ Usage:
     python run_experiment.py eval --exp-dir experiments/cart_pole/20260106_100943
     python run_experiment.py eval --task cart_pole  # Uses latest experiment
 """
+
 import os
+
 os.environ.setdefault("MUJOCO_GL", "egl")  # Set before any MuJoCo imports
 
 import argparse
 import sys
 from pathlib import Path
 
-import jax
-import jax.numpy as jnp
-
-# Import gpc first for CUDA setup
-import gpc  # noqa: F401
-
 from flax import nnx
 from hydrax.algs import CEM, Evosax, PredictiveSampling
 
+# Import gpc first for CUDA setup
+import gpc  # noqa: F401
 from gpc.architectures import DenoisingCNN, DenoisingMLP
-from gpc.cost_conditioned import CostConditionedMLP
 from gpc.augmented import PolicyAugmentedController
 from gpc.config import EvaluationConfig, TrainingConfig
+from gpc.cost_conditioned import CostConditionedMLP
 from gpc.envs import (
+    AntGymEnv,
+    AvoidEnv,
     CartPoleEnv,
     CraneEnv,
     DoubleCartPoleEnv,
+    HalfCheetahGymEnv,
     HumanoidEnv,
+    HumanoidGymEnv,
     HumanoidMocapEnv,
     ParticleEnv,
     PendulumEnv,
     PushTEnv,
     WalkerEnv,
     WalkerGymEnv,
-    AntGymEnv,
-    HumanoidGymEnv,
-    HalfCheetahGymEnv,
 )
 from gpc.experiment import ExperimentManager
 from gpc.policy import Policy
+from gpc.sweep import expand_config_sweep, print_sweep_summary
 from gpc.testing import test_and_record, test_interactive
 from gpc.train_config import train_with_config
-from gpc.sweep import expand_config_sweep, print_sweep_summary
-
 
 # Task name to environment class mapping
 TASK_ENVS = {
@@ -55,12 +53,12 @@ TASK_ENVS = {
     "double_cart_pole": DoubleCartPoleEnv,
     "pendulum": PendulumEnv,
     "particle": ParticleEnv,
+    "avoid": AvoidEnv,
     "walker": WalkerEnv,
     "walker_gym": WalkerGymEnv,
     "crane": CraneEnv,
     "humanoid": HumanoidEnv,
     "humanoid_mocap": HumanoidMocapEnv,
-    "pusht": PushTEnv,
     "pusht": PushTEnv,
     "ant_gym": AntGymEnv,
     "humanoid_gym": HumanoidGymEnv,
@@ -75,21 +73,22 @@ def create_environment(config: TrainingConfig):
             f"Unknown task: {config.task_name}. "
             f"Available: {list(TASK_ENVS.keys())}"
         )
-    
+
     env_class = TASK_ENVS[config.task_name]
-    
+
     # Handle environment-specific arguments
     kwargs = {
         "episode_length": config.episode_length,
         "render_camera": config.render_camera,
         "render_resolution": config.video_resolution,
+        "planning_horizon": config.num_knots,
     }
-    
+
     if config.task_name in ("ant_gym", "humanoid_gym", "half_cheetah_gym"):
-        if hasattr(config, 'terminate_when_unhealthy'):
+        if hasattr(config, "terminate_when_unhealthy"):
             kwargs["terminate_when_unhealthy"] = config.terminate_when_unhealthy
         kwargs["sim_steps_per_control_step"] = config.action_repeat
-        
+
     return env_class(**kwargs)
 
 
@@ -103,7 +102,7 @@ def create_controller(env, config: TrainingConfig):
         "num_randomizations": config.num_randomizations,
         "iterations": config.iterations,
     }
-    
+
     if config.controller_type == "predictive_sampling":
         base_ctrl = PredictiveSampling(
             env.task,
@@ -115,22 +114,25 @@ def create_controller(env, config: TrainingConfig):
         base_ctrl = CEM(
             env.task,
             num_samples=config.num_samples,
-            num_elites=getattr(config, 'num_elites', config.num_samples // 4),
-            sigma_start=getattr(config, 'sigma_start', 1.0),
-            sigma_min=getattr(config, 'sigma_min', 0.01),
+            num_elites=getattr(config, "num_elites", config.num_samples // 4),
+            sigma_start=getattr(config, "sigma_start", 1.0),
+            sigma_min=getattr(config, "sigma_min", 0.01),
             **common_params,
         )
     elif config.controller_type == "evosax":
         import evosax
         import evosax.algorithms
+
         # Try to find strategy in evosax.algorithms
         strategy_name = config.evosax_strategy
         # Map common names to evosax names
         if strategy_name == "OpenES":
             strategy_name = "Open_ES"
-            
-        strategy_class = getattr(evosax.algorithms, strategy_name, evosax.algorithms.CMA_ES)
-            
+
+        strategy_class = getattr(
+            evosax.algorithms, strategy_name, evosax.algorithms.CMA_ES
+        )
+
         base_ctrl = Evosax(
             env.task,
             optimizer=strategy_class,
@@ -138,15 +140,20 @@ def create_controller(env, config: TrainingConfig):
             **common_params,
         )
         base_ctrl.num_samples = config.num_samples
-        
+
         # Support sigma_start for evosax via es_params
         if config.sigma_start is not None:
             if hasattr(base_ctrl.es_params, "std_init"):
-                base_ctrl.es_params = base_ctrl.es_params.replace(std_init=config.sigma_start)
+                base_ctrl.es_params = base_ctrl.es_params.replace(
+                    std_init=config.sigma_start
+                )
             elif hasattr(base_ctrl.es_params, "sigma_init"):
-                base_ctrl.es_params = base_ctrl.es_params.replace(sigma_init=config.sigma_start)
+                base_ctrl.es_params = base_ctrl.es_params.replace(
+                    sigma_init=config.sigma_start
+                )
     elif config.controller_type == "mppi":
         from hydrax.algs import MPPI
+
         base_ctrl = MPPI(
             env.task,
             num_samples=config.num_samples,
@@ -156,7 +163,7 @@ def create_controller(env, config: TrainingConfig):
         )
     else:
         raise ValueError(f"Unknown controller type: {config.controller_type}")
-    
+
     return PolicyAugmentedController(
         base_ctrl,
         config.num_policy_samples,
@@ -168,7 +175,7 @@ def create_network(env, config: TrainingConfig):
     """Create neural network from config."""
     # Network horizon is the number of knots (new API) not planning_horizon
     horizon = config.num_knots
-    
+
     if config.use_cost_conditioning:
         if config.architecture == "mlp":
             return CostConditionedMLP(
@@ -182,7 +189,7 @@ def create_network(env, config: TrainingConfig):
             raise ValueError(
                 f"Cost conditioning only supports 'mlp' architecture, got '{config.architecture}'"
             )
-    
+
     if config.architecture == "mlp":
         return DenoisingMLP(
             action_size=env.task.model.nu,
@@ -190,7 +197,9 @@ def create_network(env, config: TrainingConfig):
             horizon=horizon,
             hidden_layers=config.hidden_layers,
             rngs=nnx.Rngs(0),
-            dropout_rate=config.inference_dropout_rate if config.inference_dropout else 0.0,
+            dropout_rate=config.inference_dropout_rate
+            if config.inference_dropout
+            else 0.0,
         )
     elif config.architecture == "cnn":
         return DenoisingCNN(
@@ -209,25 +218,27 @@ def train_command(args):
     """Run training."""
     # Expand config if it contains hyperparameter sweeps
     configs = expand_config_sweep(args.config)
-    
+
     # Print sweep summary if multiple configs
     if len(configs) > 1:
         print_sweep_summary(configs)
-        
+
         # Ask for confirmation unless --yes is provided
         if not getattr(args, "yes", False):
             response = input(f"Run all {len(configs)} experiments? [y/N]: ")
             if response.lower() not in ["y", "yes"]:
                 print("Cancelled.")
                 return 0
-    
+
     # Run each configuration
     for config_idx, (config, suffix) in enumerate(configs, 1):
         if len(configs) > 1:
-            print(f"\n{'='*80}")
-            print(f"Running configuration {config_idx}/{len(configs)}: {suffix}")
-            print(f"{'='*80}\n")
-        
+            print(f"\n{'=' * 80}")
+            print(
+                f"Running configuration {config_idx}/{len(configs)}: {suffix}"
+            )
+            print(f"{'=' * 80}\n")
+
         # Override config with command-line args if provided
         if args.num_iters is not None:
             config.num_iters = args.num_iters
@@ -235,37 +246,39 @@ def train_command(args):
             config.num_envs = args.num_envs
         if args.exp_name is not None:
             config.experiment_name = args.exp_name
-        
+
         # Append suffix to experiment name
         if suffix:
             if config.experiment_name:
                 config.experiment_name = f"{config.experiment_name}_{suffix}"
             else:
                 config.experiment_name = f"{config.task_name}_{suffix}"
-        
+
         # Create experiment manager
         exp_manager = ExperimentManager(config, base_dir=args.output_dir)
-        
+
         # Create environment, controller, and network
         env = create_environment(config)
         ctrl = create_controller(env, config)
         net = create_network(env, config)
-        
+
         # Train
         policy = train_with_config(env, ctrl, net, config, exp_manager)
-        
-        print(f"\n✓ Training complete!")
+
+        print("\n✓ Training complete!")
         print(f"  Policy: {exp_manager.get_policy_path()}")
         print(f"  Logs: {exp_manager.log_dir}")
         print(f"  Videos: {exp_manager.video_dir}")
-        
+
         if len(configs) > 1:
-            print(f"\n  Progress: {config_idx}/{len(configs)} configurations completed")
-    
+            print(
+                f"\n  Progress: {config_idx}/{len(configs)} configurations completed"
+            )
+
     if len(configs) > 1:
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"✓ All {len(configs)} experiments completed!")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
     else:
         print(f"\nView logs with: tensorboard --logdir {exp_manager.log_dir}")
 
@@ -281,41 +294,44 @@ def eval_command(args):
         )
         if exp_dir is None:
             print(f"Error: No experiments found for task '{args.task}'")
-            print(f"Run training first: python run_experiment.py train --config configs/{args.task}.yaml")
+            print(
+                f"Run training first: python run_experiment.py train --config configs/{args.task}.yaml"
+            )
             return 1
         print(f"Using latest experiment: {exp_dir}")
     else:
         print("Error: Must provide either --exp-dir or --task")
         return 1
-    
+
     # Load configuration and policy
     config_path = exp_dir / "config.yaml"
     if not config_path.exists():
         print(f"Error: No config found at {config_path}")
         return 1
-    
+
     config = TrainingConfig.from_yaml(config_path)
     policy_path = exp_dir / "policy.pkl"
-    
+
     if not policy_path.exists():
         print(f"Error: No policy found at {policy_path}")
         return 1
-    
+
     print(f"Loading policy from {policy_path}")
     policy = Policy.load(policy_path)
-    
+
     # Create environment
     env = create_environment(config)
-    
+
     # Load evaluation config
     eval_config = EvaluationConfig(
         num_episodes=args.num_episodes,
         video_fps=config.video_fps,
         video_quality=config.video_quality,
     )
-    
+
     # Check for display
     import os
+
     if args.interactive and os.environ.get("DISPLAY"):
         try:
             print("Launching interactive viewer...")
@@ -325,7 +341,8 @@ def eval_command(args):
             print("Falling back to video recording...")
             video_dir = exp_dir / "evaluation_interactive"
             test_and_record(
-                env, policy,
+                env,
+                policy,
                 num_episodes=eval_config.num_episodes,
                 output_dir=video_dir,
                 video_fps=eval_config.video_fps,
@@ -334,13 +351,14 @@ def eval_command(args):
         print("Recording evaluation videos...")
         video_dir = exp_dir / "evaluation_videos"
         test_and_record(
-            env, policy,
+            env,
+            policy,
             num_episodes=eval_config.num_episodes,
             output_dir=video_dir,
             video_fps=eval_config.video_fps,
         )
         print(f"\nVideos saved to: {video_dir.absolute()}")
-    
+
     return 0
 
 
@@ -351,19 +369,21 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    
+
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
-    
+
     # Train command
     train_parser = subparsers.add_parser("train", help="Train a new policy")
     train_parser.add_argument(
-        "--config", "-c",
+        "--config",
+        "-c",
         type=str,
         required=True,
         help="Path to config YAML file",
     )
     train_parser.add_argument(
-        "--output-dir", "-o",
+        "--output-dir",
+        "-o",
         type=str,
         default="experiments",
         help="Base output directory (default: experiments)",
@@ -387,13 +407,16 @@ def main():
         help="Custom experiment name (default: timestamp)",
     )
     train_parser.add_argument(
-        "--yes", "-y",
+        "--yes",
+        "-y",
         action="store_true",
         help="Skip confirmation prompts",
     )
-    
+
     # Eval command
-    eval_parser = subparsers.add_parser("eval", help="Evaluate a trained policy")
+    eval_parser = subparsers.add_parser(
+        "eval", help="Evaluate a trained policy"
+    )
     eval_parser.add_argument(
         "--exp-dir",
         type=str,
@@ -407,7 +430,8 @@ def main():
         help="Task name (uses latest experiment)",
     )
     eval_parser.add_argument(
-        "--output-dir", "-o",
+        "--output-dir",
+        "-o",
         type=str,
         default="experiments",
         help="Base output directory (default: experiments)",
@@ -423,9 +447,9 @@ def main():
         action="store_true",
         help="Try interactive viewer (requires display)",
     )
-    
+
     args = parser.parse_args()
-    
+
     if args.command == "train":
         return train_command(args)
     elif args.command == "eval":

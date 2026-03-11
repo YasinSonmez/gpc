@@ -4,6 +4,7 @@ from .crane import CraneEnv
 from .double_cart_pole import DoubleCartPoleEnv
 from .humanoid import HumanoidEnv
 from .particle import ParticleEnv
+from .avoid import AvoidEnv
 from .pendulum import PendulumEnv
 from .pusht import PushTEnv
 from .pusht_rl import PushTRLEnv
@@ -21,6 +22,7 @@ __all__ = [
     "CraneEnv",
     "DoubleCartPoleEnv",
     "ParticleEnv",
+    "AvoidEnv",
     "PendulumEnv",
     "PushTEnv",
     "PushTRLEnv",
@@ -32,3 +34,4 @@ __all__ = [
     "HumanoidGymEnv",
     "HalfCheetahGymEnv",
 ]
+

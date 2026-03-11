@@ -8,7 +8,7 @@ from gpc.envs import TrainingEnv
 
 class GPCPushT(PushT):
     """Refined PushT task with better reward scaling."""
-    
+
     def running_cost(self, state: mjx.Data, control: jax.Array) -> jax.Array:
         """The running cost ℓ(xₜ, uₜ) with balanced weights."""
         position_err = self._get_position_err(state)
@@ -22,19 +22,25 @@ class GPCPushT(PushT):
         # Distance to block - extremely important for the pusher to engage.
         close_to_block_cost = jnp.sum(jnp.square(close_to_block_err))
 
-        return 20.0 * position_cost + 1.0 * orientation_cost + 0.5 * close_to_block_cost
+        return (
+            20.0 * position_cost
+            + 1.0 * orientation_cost
+            + 0.5 * close_to_block_cost
+        )
+
 
 class PushTEnv(TrainingEnv):
     """Training environment for the pusher-T task."""
 
-    def __init__(self, episode_length: int, render_camera: str = -1, **kwargs) -> None:
+    def __init__(
+        self, episode_length: int, render_camera: str = -1, **kwargs
+    ) -> None:
         """Set up the pusher-T training environment."""
         super().__init__(
-            # task=PushT(),
             task=GPCPushT(),
             episode_length=episode_length,
             render_camera=render_camera,
-            **kwargs
+            **kwargs,
         )
 
     def reset(self, data: mjx.Data, rng: jax.Array) -> mjx.Data:

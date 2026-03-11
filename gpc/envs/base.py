@@ -19,10 +19,11 @@ class SimulatorState:
         rng: The random number generator key.
         running_cost: Accumulated cost for the most recent control step.
     """
+
     data: mjx.Data
     t: int
     rng: jax.Array
-    running_cost: jax.Array = 0.0 # Accumulated cost of the last control step
+    running_cost: jax.Array = 0.0  # Accumulated cost of the last control step
 
 
 class TrainingEnv(ABC):
@@ -31,14 +32,14 @@ class TrainingEnv(ABC):
     def __init__(
         self,
         task: Task,
-        planning_horizon: int,
         episode_length: int,
         sim_steps_per_control_step: int = 1,
         render_camera: str = -1,
         render_resolution: tuple[int, int] = (640, 480),
+        planning_horizon: int = 0,  # TODO: set
     ) -> None:
         """Initialize the training environment.
-        
+
         Args:
             task: The hydrax task.
             episode_length: Number of control steps in an episode.
@@ -58,22 +59,30 @@ class TrainingEnv(ABC):
         """Lazy-initialize the renderer only when needed."""
         if self._renderer is None:
             width, height = self.render_resolution
-            
+
             # Clamp resolution to model's offscreen framebuffer limits to avoid ValueError
             offwidth = self.task.mj_model.vis.global_.offwidth
             offheight = self.task.mj_model.vis.global_.offheight
-            
+
             if offwidth > 0 and width > offwidth:
-                print(f"WARNING: Requested width {width} exceeds model offwidth {offwidth}. Clamping.")
+                print(
+                    f"WARNING: Requested width {width} exceeds model offwidth {offwidth}. Clamping."
+                )
                 width = offwidth
             if offheight > 0 and height > offheight:
-                print(f"WARNING: Requested height {height} exceeds model offheight {offheight}. Clamping.")
+                print(
+                    f"WARNING: Requested height {height} exceeds model offheight {offheight}. Clamping."
+                )
                 height = offheight
-                
-            self._renderer = mujoco.Renderer(self.task.mj_model, width=width, height=height)
+
+            self._renderer = mujoco.Renderer(
+                self.task.mj_model, width=width, height=height
+            )
             # Disable shadows and reflections for faster rendering unless high quality is needed
             self._renderer.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = False
-            self._renderer.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = False
+            self._renderer.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = (
+                False
+            )
             self._renderer.scene.flags[mujoco.mjtRndFlag.mjRND_FOG] = False
             self._renderer.scene.flags[mujoco.mjtRndFlag.mjRND_HAZE] = False
         return self._renderer
@@ -179,26 +188,31 @@ class TrainingEnv(ABC):
 
     def step(self, state: SimulatorState, action: jax.Array) -> SimulatorState:
         """Take a simulation step and return the new state."""
+
         def _step_fn(data, _):
             next_data = mjx.step(self.task.model, data.replace(ctrl=action))
             cost = self.task.running_cost(next_data, action)
             return next_data, cost
 
         def _do_step(_):
-            next_data, costs = jax.lax.scan(_step_fn, state.data, None, length=self.sim_steps_per_control_step)
+            next_data, costs = jax.lax.scan(
+                _step_fn,
+                state.data,
+                None,
+                length=self.sim_steps_per_control_step,
+            )
             # Accumulate cost over all integration steps during this control step
             total_step_cost = jnp.sum(costs)
-            return state.replace(data=next_data, t=state.t + 1, running_cost=total_step_cost)
+            return state.replace(
+                data=next_data, t=state.t + 1, running_cost=total_step_cost
+            )
 
         def _do_reset(_):
             # If episode is over, return reset state and 0 cost
             return self._reset_state(state).replace(running_cost=jnp.array(0.0))
 
         return jax.lax.cond(
-            self.episode_over(state),
-            _do_reset,
-            _do_step,
-            operand=None
+            self.episode_over(state), _do_reset, _do_step, operand=None
         )
 
         # Check if we've reached a sub-goal that needs updating
