@@ -132,6 +132,141 @@ class TrainingEnv(ABC):
 
         return np.stack(frames)
 
+    def render_qpos(
+        self,
+        qpos: np.ndarray,
+        fps: int = 30,
+        proposal_stats: dict | None = None,
+        proposal_data: dict | None = None,
+    ) -> np.ndarray:
+        """Render video frames from a qpos trajectory (memory-efficient).
+
+        Only requires qpos arrays instead of full SimulatorState/mjx.Data,
+        dramatically reducing GPU memory during training.
+
+        Args:
+            qpos: Joint positions, shape (T, nq).
+            fps: Frames per second for the video.
+            proposal_stats: Optional dict with per-timestep arrays:
+                'policy_cost', 'spc_cost', 'episode_cost' (each shape (T,))
+                for proposal overlay.
+            proposal_data: Optional dict with per-timestep proposal data for
+                drawing trajectories and ghost bodies on the MuJoCo scene:
+                'trace_sites': (T, S, H+1, num_sites, 3)
+                'costs': (T, S)
+                'best_idx': (T,)
+                'controls': (T, S, H, nu)
+                'num_policy_samples': int
+                'num_display': int (0 = all)
+                'ghost_count': int (0 = disabled)
+                'ghost_steps': int
+
+        Returns:
+            Video frames with shape (N, C, H, W).
+        """
+        from gpc.proposal_overlay import (
+            add_proposal_geoms_to_scene,
+            add_ghost_geoms_to_scene,
+            build_stats_lines,
+            text_overlay,
+            color_legend_overlay,
+            get_palette,
+        )
+
+        sim_dt = self.task.model.opt.timestep
+        render_dt = 1.0 / fps
+        render_every = max(1, int(round(render_dt / sim_dt)))
+        total_steps = qpos.shape[0]
+        steps = np.arange(0, total_steps, render_every)
+
+        mj_data = mujoco.MjData(self.task.mj_model)
+        frames = []
+
+        has_proposals = proposal_data is not None
+        if has_proposals:
+            nps = proposal_data.get("num_policy_samples", 0)
+            num_display = proposal_data.get("num_display", 0)
+            ghost_count = proposal_data.get("ghost_count", 0)
+            ghost_steps = proposal_data.get("ghost_steps", 4)
+            pal = get_palette(proposal_data.get("palette", "tableau10"))
+            n_spc = proposal_data["costs"].shape[1] - nps
+
+            # Precompute cumulative stats over ALL timesteps (not just rendered frames)
+            inst_costs = np.asarray(proposal_data.get("inst_costs", np.zeros(total_steps)))
+            cum_costs = np.cumsum(inst_costs)
+            is_policy_best = np.asarray(proposal_data["best_idx"]) < nps
+            cum_policy_best = np.cumsum(is_policy_best.astype(float))
+
+        for frame_idx, i in enumerate(steps):
+            mj_data.qpos[:] = np.asarray(qpos[i])
+            mujoco.mj_forward(self.task.mj_model, mj_data)
+            try:
+                self.renderer.update_scene(mj_data, camera=self.render_camera)
+            except ValueError:
+                self.renderer.update_scene(mj_data, camera=-1)
+
+            if has_proposals:
+                traces_t = np.asarray(proposal_data["trace_sites"][i])
+                costs_t = np.asarray(proposal_data["costs"][i])
+                best_t = int(proposal_data["best_idx"][i])
+
+                # Draw proposal lines on the scene
+                add_proposal_geoms_to_scene(
+                    self.renderer._scene,
+                    traces_t,
+                    costs_t,
+                    best_t,
+                    num_policy_samples=nps,
+                    pal=pal,
+                    num_display=num_display,
+                )
+
+                # Draw ghost bodies
+                if ghost_count > 0 and "controls" in proposal_data:
+                    controls_t = np.asarray(proposal_data["controls"][i])
+                    add_ghost_geoms_to_scene(
+                        self.renderer._scene,
+                        self.task.mj_model,
+                        mj_data.qpos.copy(),
+                        mj_data.qvel.copy(),
+                        controls_t,
+                        costs_t,
+                        best_t,
+                        num_policy_samples=nps,
+                        pal=pal,
+                        num_ghosts=ghost_count,
+                        ghost_steps=ghost_steps,
+                    )
+
+            pixels = self.renderer.render().copy()  # H, W, C
+
+            # Burn stats overlay if proposals are present
+            if has_proposals:
+                cum_cost = float(cum_costs[i])
+                pct_policy_best = 100.0 * float(cum_policy_best[i]) / (i + 1)
+
+                lines = build_stats_lines(
+                    i, total_steps, costs_t, best_t, nps,
+                    cum_cost, pct_policy_best,
+                )
+                # text_overlay/color_legend_overlay expect BGR, convert round-trip
+                frame_bgr = pixels[:, :, ::-1]  # RGB → BGR
+                frame_bgr = text_overlay(frame_bgr, lines)
+                frame_bgr = color_legend_overlay(frame_bgr, pal, n_spc)
+                pixels = frame_bgr[:, :, ::-1].copy()  # BGR → RGB
+
+            frames.append(pixels.transpose(2, 0, 1))  # C, H, W
+
+        result = np.stack(frames)
+
+        # Legacy text-only overlay (when proposal_data is not provided)
+        if proposal_stats is not None and not has_proposals:
+            result = overlay_proposal_stats(
+                result, proposal_stats, steps, total_steps
+            )
+
+        return result
+
     @abstractmethod
     def reset(self, data: mjx.Data, rng: jax.Array) -> mjx.Data:
         """Reset the simulator to start a new episode."""
@@ -224,3 +359,74 @@ class TrainingEnv(ABC):
         )
 
         return next_state
+
+
+def overlay_proposal_stats(
+    frames: np.ndarray,
+    stats: dict,
+    steps: np.ndarray,
+    episode_length: int,
+) -> np.ndarray:
+    """Overlay proposal statistics text on video frames.
+
+    Args:
+        frames: Video frames, shape (N, C, H, W).
+        stats: Dict with per-timestep arrays (each shape (T,)):
+            'policy_cost', 'spc_cost', 'episode_cost'.
+        steps: Timestep indices corresponding to each frame.
+        episode_length: Total episode length.
+
+    Returns:
+        Frames with overlay, shape (N, C, H, W).
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    policy_costs = np.asarray(stats["policy_cost"])
+    spc_costs = np.asarray(stats["spc_cost"])
+    episode_costs = np.asarray(stats["episode_cost"])
+
+    cum_cost = np.cumsum(episode_costs)
+    policy_better = np.cumsum(policy_costs < spc_costs)
+    totals = np.arange(1, episode_length + 1)
+    policy_best_pct = policy_better / totals * 100
+
+    try:
+        font = ImageFont.load_default(size=16)
+    except TypeError:
+        font = ImageFont.load_default()
+
+    BLUE = (100, 150, 255)
+    ORANGE = (255, 165, 0)
+    GREEN = (0, 255, 100)
+    WHITE = (255, 255, 255)
+    BLACK = (0, 0, 0)
+
+    result = []
+    for i, t in enumerate(steps):
+        frame_hwc = frames[i].transpose(1, 2, 0).copy()
+        img = Image.fromarray(frame_hwc)
+        draw = ImageDraw.Draw(img)
+
+        p_cost = float(policy_costs[t])
+        s_cost = float(spc_costs[t])
+        best_src = "Policy" if p_cost < s_cost else "SPC"
+
+        lines = [
+            (f"Step {t}/{episode_length}", WHITE),
+            (f"Policy: {p_cost:.2f}", BLUE),
+            (f"SPC:    {s_cost:.2f}", ORANGE),
+            (f"Best: {best_src}", GREEN if best_src == "Policy" else ORANGE),
+            (f"Ep Cost: {cum_cost[t]:.1f}", WHITE),
+            (f"Policy Best: {policy_best_pct[t]:.1f}%", WHITE),
+        ]
+
+        y_pos = 8
+        for text, color in lines:
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                draw.text((10 + dx, y_pos + dy), text, fill=BLACK, font=font)
+            draw.text((10, y_pos), text, fill=color, font=font)
+            y_pos += 20
+
+        result.append(np.array(img).transpose(2, 0, 1))
+
+    return np.stack(result)

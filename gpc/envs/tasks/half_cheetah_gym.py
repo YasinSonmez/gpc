@@ -11,6 +11,7 @@ from mujoco import mjx
 from pathlib import Path
 
 from hydrax.task_base import Task
+from gpc.envs.tasks.ant_gym import _ensure_trace_site
 
 
 class HalfCheetahGym(Task):
@@ -32,7 +33,9 @@ class HalfCheetahGym(Task):
                 "Copy it from brax/brax/envs/assets/half_cheetah.xml"
             )
 
-        super().__init__(mj_model, trace_sites=[])
+        mj_model, _site_names = _ensure_trace_site(mj_model, body_name="torso")
+
+        super().__init__(mj_model, trace_sites=_site_names)
 
         # Brax HalfCheetah parameters (matching brax/envs/half_cheetah.py)
         self.forward_reward_weight = 1.0

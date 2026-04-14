@@ -8,6 +8,34 @@ from mujoco import mjx
 from hydrax.task_base import Task
 
 
+def _ensure_trace_site(
+    mj_model: mujoco.MjModel,
+    body_name: str = "torso",
+    site_name: str | None = None,
+) -> tuple[mujoco.MjModel, list[str]]:
+    """Add a trace site to *body_name* if the model has no sites.
+
+    Uses ``MjSpec`` to rebuild the model with the new site.
+    Returns ``(mj_model, site_names)`` — the possibly-rebuilt model and the
+    list of site name strings to pass to ``Task.__init__``.
+    """
+    if mj_model.nsite > 0:
+        return mj_model, [mj_model.site(i).name for i in range(mj_model.nsite)]
+    if site_name is None:
+        site_name = f"{body_name}_site"
+    try:
+        spec = mujoco.MjSpec.from_model(mj_model)
+        body = spec.find_body(body_name)
+        if body is not None:
+            s = body.add_site()
+            s.name = site_name
+            mj_model = spec.compile()
+            return mj_model, [site_name]
+    except Exception:
+        pass
+    return mj_model, []
+
+
 class AntGym(Task):
     """Ant quadruped tasked with forward locomotion, following Brax/Gymnasium rewards.
     
@@ -27,7 +55,10 @@ class AntGym(Task):
             brax_env = envs.create('ant', backend='mjx', terminate_when_unhealthy=terminate_when_unhealthy)
             mj_model = brax_env.sys.mj_model
         
-        super().__init__(mj_model, trace_sites=[])
+        # Add a trace site on the torso if one doesn't already exist
+        mj_model, _site_names = _ensure_trace_site(mj_model, body_name="torso")
+
+        super().__init__(mj_model, trace_sites=_site_names)
         
         # Brax Ant parameters
         self.ctrl_cost_weight = 0.5

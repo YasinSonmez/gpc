@@ -87,7 +87,7 @@ class WalkerGym(Task):
         reward_if_healthy = self.healthy_reward + forward_reward - ctrl_cost
         
         # Return -reward if healthy, or a large penalty if fallen
-        return jnp.where(is_healthy, -reward_if_healthy, 10.0)
+        return jnp.where(is_healthy, -reward_if_healthy, 1000.0)
 
     def terminal_cost(self, state: mjx.Data) -> jax.Array:
         """The terminal cost ϕ(x_T). 

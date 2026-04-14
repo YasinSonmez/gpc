@@ -79,6 +79,12 @@ class TrainingConfig:
     record_training_videos: bool = True
     num_training_videos: int = 2
     record_eval_videos: bool = True
+    proposal_overlay: bool = False  # Overlay proposal stats on videos
+    proposal_video_ghost_count: int = 3  # Ghost bodies per frame (0=disabled)
+    proposal_video_ghost_steps: int = 4  # Future steps per ghost body
+    proposal_video_num_display: int = 0  # Max proposals to draw (0=all)
+    proposal_video_trace_points: int = 10  # Horizon subsample points for trajectory lines (0=all)
+    proposal_video_palette: str = "tableau10"  # Color palette
     render_camera: str = "floating"
     
     # WandB settings

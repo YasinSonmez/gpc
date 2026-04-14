@@ -32,6 +32,7 @@ def simulate_episode(
     value_params: Optional[Any] = None,
     value_alpha: float = 0.0,
     policy_weight: jax.Array = 1.0,
+    trace_points: int = 10,
 ) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, SimulatorState]:
     """Starting from a random initial state, run SPC and record training data.
 
@@ -57,7 +58,15 @@ def simulate_episode(
         U_guess: The initial guess for the optimal actions at each time step.
         J_spc: cost of the best action sequence found by SPC at each time step.
         J_policy: cost of the best action sequence found by the policy.
-        states: Vmapped simulator states at each time step.
+        J_inst: instantaneous cost at each time step.
+        actions_taken: actions applied at each time step.
+        next_y: next observations.
+        dones: done flags.
+        qpos: joint positions at each time step.
+        proposal_costs: ``(T, S)`` — total cost per sample per timestep.
+        proposal_best_idx: ``(T,)`` — index of the best sample per timestep.
+        proposal_trace_sub: ``(T, S, K, num_sites, 3)`` — subsampled trace
+            site positions (K evenly spaced horizon points).
     """
     rng, ctrl_rng, env_rng = jax.random.split(rng, 3)
 
@@ -70,6 +79,12 @@ def simulate_episode(
         value_params=value_params,
         value_alpha=value_alpha,
     )
+
+    # Compute trace subsample indices (static at trace time).
+    # Subsample horizon trace_sites to keep memory reasonable when vmapped.
+    _Hp1 = ctrl.ctrl_steps + 1
+    _K = min(trace_points, _Hp1) if trace_points > 0 else _Hp1
+    _trace_idx = jnp.array(np.round(np.linspace(0, _Hp1 - 1, _K)).astype(int))
 
     def _scan_fn(
         carry: Tuple[SimulatorState, jax.Array, PACParams], t: int
@@ -137,26 +152,29 @@ def simulate_episode(
         # This uses the running_cost stored in SimulatorState by env.step()
         instant_cost = x.running_cost
 
-        return (x, Us, psi), (y, U_star_knots, U_guess, spc_best, policy_best, instant_cost, u_taken, x)
+        # Compute next observation inside scan (avoids storing full mjx.Data)
+        next_y = env._get_observation(x)
+
+        # Subsample trace sites for lightweight proposal visualization
+        best_idx = jnp.argmin(costs)
+        trace_sub = rollouts.trace_sites[:, _trace_idx, :, :]  # (S, K, sites, 3)
+
+        return (x, Us, psi), (y, U_star_knots, U_guess, spc_best, policy_best, instant_cost, u_taken, next_y, x.data.qpos, costs, best_idx, trace_sub)
 
     rng, u_rng = jax.random.split(rng)
     U = jax.random.normal(
         u_rng,
         (ctrl.num_policy_samples, ctrl.num_knots, env.task.model.nu),
     )
-    _, (y, U, U_guess, J_spc, J_policy, J_inst, actions_taken, states) = jax.lax.scan(
+    _, (y, U, U_guess, J_spc, J_policy, J_inst, actions_taken, next_y, qpos, proposal_costs, proposal_best_idx, proposal_trace_sub) = jax.lax.scan(
         _scan_fn, (x, U, psi), jnp.arange(env.episode_length)
     )
 
-    # Produce next observations for replay buffer
-    next_y = jax.vmap(env._get_observation)(states)
-    
     # Calculate dones (last step is done)
-    # states.t is (episode_length,)
     dones = jnp.zeros(env.episode_length)
     dones = dones.at[-1].set(1.0)
     
-    return y, U, U_guess, J_spc, J_policy, J_inst, actions_taken, next_y, dones, states
+    return y, U, U_guess, J_spc, J_policy, J_inst, actions_taken, next_y, dones, qpos, proposal_costs, proposal_best_idx, proposal_trace_sub
 
 
 def fit_policy(
@@ -429,7 +447,7 @@ def train(  # noqa: PLR0915 this is a long function, don't limit to 50 lines
         value_params: Optional[Any] = None,
         value_alpha: float = 0.0,
     ) -> Tuple[
-        jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, SimulatorState
+        jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array
     ]:
         """Simulate episodes in parallel.
 
@@ -443,16 +461,16 @@ def train(  # noqa: PLR0915 this is a long function, don't limit to 50 lines
             Average cost of SPC's best action sequence.
             Average cost of the policy's best action sequence.
             Fraction of times the policy generated the best action sequence.
-            First four simulation trajectories for visualization.
+            First four simulation qpos trajectories for visualization.
         """
         rngs = jax.random.split(rng, num_envs)
 
-        y, U, U_guess, J_spc, J_policy, J_inst, actions_taken, next_y, dones, states = jax.vmap(
-            simulate_episode, in_axes=(None, None, None, None, 0, None, None, None, None, None)
+        y, U, U_guess, J_spc, J_policy, J_inst, actions_taken, next_y, dones, qpos, _, _, _ = jax.vmap(
+            simulate_episode, in_axes=(None, None, None, None, 0, None, None, None, None, None, None)
         )(env, ctrl, policy, exploration_noise_level, rngs, strategy, None, 1.0, value_params, value_alpha)
 
-        # Get the first few simulated trajectories
-        selected_states = jax.tree.map(lambda x: x[:num_videos], states)
+        # Get the first few simulated qpos trajectories for video rendering
+        selected_qpos = qpos[:num_videos]
 
         frac = jnp.mean(J_policy < J_spc)
         return (
@@ -466,7 +484,7 @@ def train(  # noqa: PLR0915 this is a long function, don't limit to 50 lines
             actions_taken,
             next_y,
             dones,
-            selected_states,
+            selected_qpos,
         )
 
     @nnx.jit
@@ -569,8 +587,8 @@ def train(  # noqa: PLR0915 this is a long function, don't limit to 50 lines
             render_start = time.time()
             video_frames = []
             for j in range(num_videos):
-                states = jax.tree.map(lambda x: x[j], traj)  # noqa: B023
-                video_frames.append(env.render(states, video_fps))
+                qpos_ep = np.asarray(traj[j])  # traj is selected qpos
+                video_frames.append(env.render_qpos(qpos_ep, video_fps))
             video_frames = np.stack(video_frames)
             render_time = time.time() - render_start
 

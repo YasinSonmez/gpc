@@ -259,7 +259,7 @@ def train_with_config(
                 
             return jax.vmap(
                 simulate_episode,
-                in_axes=(None, None, None, None, 0, None, None, None, None, None, None),
+                in_axes=(None, None, None, None, 0, None, None, None, None, None, None, None),
             )(
                 env, 
                 ctrl, 
@@ -272,6 +272,7 @@ def train_with_config(
                 value_params,
                 value_alpha,
                 policy_weight,
+                config.proposal_video_trace_points,
             )
         
         @nnx.jit(static_argnums=(6,))
@@ -405,7 +406,7 @@ def train_with_config(
                 v_params = nnx.state(value_trainer.model) if value_trainer else None
                 
                 y_all = jit_simulate(policy, sim_rng, v_params, value_alpha, policy_weight)
-                y, U, U_guess, J_spc, J_policy, J_inst, actions_taken, next_y, dones, states = y_all
+                y, U, U_guess, J_spc, J_policy, J_inst, actions_taken, next_y, dones, qpos, prop_costs, prop_best, prop_traces = y_all
                 y.block_until_ready()
                 sim_time = time.time() - sim_start
                 
@@ -563,9 +564,27 @@ def train_with_config(
                         print(f"  [2/3] Rendering training videos...")
                     
                     render_start = time.time()
+
                     for vid_idx in range(min(config.num_training_videos, config.num_envs)):
-                        traj_ep = jax.tree.map(lambda x: x[vid_idx], states)
-                        frames = env.render(traj_ep, fps=config.video_fps)
+                        qpos_ep = np.asarray(qpos[vid_idx])
+                        if config.proposal_overlay:
+                            # Use proposal data captured during the training batch
+                            frames = env.render_qpos(
+                                qpos_ep, fps=config.video_fps,
+                                proposal_data={
+                                    "trace_sites": np.asarray(prop_traces[vid_idx]),
+                                    "costs": np.asarray(prop_costs[vid_idx]),
+                                    "best_idx": np.asarray(prop_best[vid_idx]),
+                                    "inst_costs": np.asarray(J_inst[vid_idx]),
+                                    "num_policy_samples": ctrl.num_policy_samples,
+                                    "num_display": config.proposal_video_num_display,
+                                    "ghost_count": 0,  # ghost bodies need full controls; skip in training
+                                    "ghost_steps": config.proposal_video_ghost_steps,
+                                    "palette": config.proposal_video_palette,
+                                },
+                            )
+                        else:
+                            frames = env.render_qpos(qpos_ep, fps=config.video_fps)
                         
                         if frames.dtype != np.uint8:
                             frames = (frames * 255).astype(np.uint8)
@@ -836,9 +855,9 @@ def train_with_config(
                 try:
                     # Save what was just collected in this iteration
                     # y: (num_envs, time, obs), actions_taken: (num_envs, time, act)
-                    # states.data.qpos: (num_envs, time, nq)
-                    root_xy = np.array(states.data.qpos[:, :, 0:2])
-                    root_quat = np.array(states.data.qpos[:, :, 3:7])
+                    # qpos: (num_envs, time, nq)
+                    root_xy = np.array(qpos[:, :, 0:2])
+                    root_quat = np.array(qpos[:, :, 3:7])
                     
                     np.savez(
                         exp_manager.exp_dir / f"iteration_{iteration:04d}_data.npz",
@@ -935,55 +954,87 @@ def train_with_config(
         eval_spc_costs = []
         eval_videos = []
         
-        for ep in range(config.num_eval_episodes):
-            if config.log_verbosity >= 1:
-                print(f"  Evaluation episode {ep + 1}/{config.num_eval_episodes}...", end=" ")
-            
-            rng, eval_rng = jax.random.split(rng)
-            _, _, _, J_spc_eval, J_eval, _, _, _, _, states = simulate_episode(
-                env, ctrl, policy, 0.0, eval_rng, config.strategy
-            )
-            eval_cost = float(jnp.mean(J_eval))
-            eval_spc_cost = float(jnp.mean(J_spc_eval))
-            eval_costs.append(eval_cost)
-            eval_spc_costs.append(eval_spc_cost)
-            
-            if config.log_verbosity >= 1:
-                print(f"cost={eval_cost:.4f}")
-            
-            if config.record_eval_videos:
-                frames = env.render(states, fps=config.video_fps)
-                if frames.dtype != np.uint8:
-                    frames = (frames * 255).astype(np.uint8)
-                frames = np.ascontiguousarray(frames)
-                eval_videos.append(frames)
-                
-                frames_for_save = frames.transpose(0, 2, 3, 1) if frames.shape[1] == 3 else frames
-                video_path = exp_manager.get_video_path(episode=ep + 1)
-                exp_manager.save_video(
-                    frames_for_save, video_path, fps=config.video_fps, 
-                    quality=config.video_quality, resolution=config.video_resolution
+        if config.num_eval_episodes > 0:
+            # Vectorized evaluation — run all episodes in parallel
+            @nnx.jit
+            def jit_eval(policy, rng):
+                rngs = jax.random.split(rng, config.num_eval_episodes)
+                return jax.vmap(
+                    simulate_episode,
+                    in_axes=(None, None, None, None, 0, None, None, None, None, None, None, None),
+                )(
+                    env, ctrl, policy, 0.0, rngs, config.strategy,
+                    None, 1.0, None, 0.0, jnp.array(1.0),
+                    config.proposal_video_trace_points,
                 )
-        
-        if eval_costs:
+
+            rng, eval_rng = jax.random.split(rng)
+            eval_out = jit_eval(policy, eval_rng)
+            _, _, _, J_spc_eval, J_policy_eval, J_inst_eval, _, _, _, qpos_eval, prop_costs_eval, prop_best_eval, prop_traces_eval = eval_out
+            J_inst_eval.block_until_ready()
+
+            # Episode costs = sum of instant costs over the episode
+            episode_costs_eval = jnp.sum(J_inst_eval, axis=1)  # (num_eval_episodes,)
+            eval_costs = [float(c) for c in episode_costs_eval]
+            eval_spc_costs = [float(jnp.mean(J_spc_eval[i])) for i in range(config.num_eval_episodes)]
+
+            if config.log_verbosity >= 1:
+                for ep in range(config.num_eval_episodes):
+                    print(f"  Evaluation episode {ep + 1}/{config.num_eval_episodes}... "
+                          f"cost={eval_costs[ep]:.4f}")
+
+            # Render eval videos
+            if config.record_eval_videos:
+                for ep in range(config.num_eval_episodes):
+                    qpos_ep = np.asarray(qpos_eval[ep])
+                    if config.proposal_overlay:
+                        # Use proposal data captured during the eval batch
+                        frames = env.render_qpos(
+                            qpos_ep, fps=config.video_fps,
+                            proposal_data={
+                                "trace_sites": np.asarray(prop_traces_eval[ep]),
+                                "costs": np.asarray(prop_costs_eval[ep]),
+                                "best_idx": np.asarray(prop_best_eval[ep]),
+                                "inst_costs": np.asarray(J_inst_eval[ep]),
+                                "num_policy_samples": ctrl.num_policy_samples,
+                                "num_display": config.proposal_video_num_display,
+                                "ghost_count": 0,  # ghost bodies need full controls; skip
+                                "ghost_steps": config.proposal_video_ghost_steps,
+                                "palette": config.proposal_video_palette,
+                            },
+                        )
+                    else:
+                        frames = env.render_qpos(qpos_ep, fps=config.video_fps)
+                    if frames.dtype != np.uint8:
+                        frames = (frames * 255).astype(np.uint8)
+                    frames = np.ascontiguousarray(frames)
+                    eval_videos.append(frames)
+
+                    frames_for_save = frames.transpose(0, 2, 3, 1) if frames.shape[1] == 3 else frames
+                    video_path = exp_manager.get_video_path(episode=ep + 1)
+                    exp_manager.save_video(
+                        frames_for_save, video_path, fps=config.video_fps,
+                        quality=config.video_quality, resolution=config.video_resolution,
+                    )
+
             eval_mean = np.mean(eval_costs)
             eval_std = np.std(eval_costs)
             eval_spc_mean = np.mean(eval_spc_costs)
-            
+
             if config.log_verbosity >= 1:
-                print(f"\n  Evaluation cost: {eval_mean:.4f} ± {eval_std:.4f}")
+                print(f"\n  Evaluation episode cost: {eval_mean:.4f} ± {eval_std:.4f}")
                 print(f"  Videos saved to: {exp_manager.eval_dir}")
-            
+
             if config.use_wandb:
                 wandb.log({
                     "eval/cost_mean": eval_mean,
                     "eval/cost_std": eval_std,
-                    "eval/cost_policy": eval_mean,
+                    "eval/cost_policy": float(jnp.mean(J_policy_eval)),
                     "eval/cost_spc": eval_spc_mean,
                     "eval/cost_min": np.min(eval_costs),
                     "eval/cost_max": np.max(eval_costs),
                 })
-            
+
             if eval_videos and config.use_wandb:
                 wandb.log({
                     "eval_videos": [wandb.Video(vid, fps=config.video_fps, format="mp4") for vid in eval_videos]
@@ -1043,10 +1094,10 @@ def train_with_config(
                     sact_v = data_dict['single_actions'].reshape(num_episodes, episode_len, -1)
                     cost_v = data_dict['costs'].reshape(num_episodes, episode_len)
                     
-                    # Extract root position and orientation from SimulatorState (states)
-                    # states.data.qpos shape: (num_envs, episode_length, nq)
-                    root_xy = np.array(states.data.qpos[:, :, 0:2])
-                    root_quat = np.array(states.data.qpos[:, :, 3:7]) # [qw, qx, qy, qz]
+                    # Extract root position and orientation from qpos
+                    # qpos: (num_envs, episode_length, nq)
+                    root_xy = np.array(qpos[:, :, 0:2])
+                    root_quat = np.array(qpos[:, :, 3:7]) # [qw, qx, qy, qz]
                     
                     np.savez(
                         exp_manager.exp_dir / "spc_data.npz",

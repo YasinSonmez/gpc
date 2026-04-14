@@ -14,14 +14,14 @@ strategy: "best"
 # spline_type: "linear" # Smooth transition between knots
 
 architecture: mlp
-hidden_layers: [256, 256, 256]
+hidden_layers: [256, 256]
 
 # Training
-num_iters: 25
+num_iters: 10
 num_envs: 128
 learning_rate: 0.001
 batch_size: 4096
-num_epochs: 50
+num_epochs: 10
 exploration_noise_level: 0.0
 normalize_observations: true
 seed: 0
@@ -41,7 +41,7 @@ warmstart_value_buffer: false
 
 # Checkpointing & Evaluation
 checkpoint_every: 20
-num_eval_episodes: 5
+num_eval_episodes: 1
 video_fps: 30
 video_quality: 10
 video_resolution: [1920, 1080]
@@ -68,6 +68,10 @@ num_training_videos: 1
 record_eval_videos: false
 log_verbosity: 2
 render_camera: "floating"
+proposal_overlay: true
+proposal_video_ghost_count: 0  # Ghost bodies per frame (0=disabled)
+proposal_video_num_display: 32  # Max proposals to draw (0=all)
+proposal_video_trace_points: 10  # Horizon points per trajectory line (0=all)
 
 experiment_name: walker_gym_test1
 wandb_project: gpc_final_ablations
