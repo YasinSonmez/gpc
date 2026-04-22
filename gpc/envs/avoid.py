@@ -1,18 +1,18 @@
 import jax
 import jax.numpy as jnp
-from hydrax.tasks.avoid import Avoid
 from mujoco import mjx
 
 from gpc.envs import TrainingEnv
+from gpc.envs.tasks.avoid import Avoid
 
 
 class AvoidEnv(TrainingEnv):
-    """Training environment for the particle task."""
+    """Training environment for the avoid task with wall obstacle."""
 
     def __init__(
-        self, episode_length: int = 100, render_camera: str = -1, **kwargs
+        self, episode_length: int = 200, render_camera: str = -1, **kwargs
     ) -> None:
-        """Set up the particle training environment."""
+        """Set up the avoid training environment."""
         super().__init__(
             task=Avoid(),
             episode_length=episode_length,
@@ -21,23 +21,38 @@ class AvoidEnv(TrainingEnv):
         )
 
     def reset(self, data: mjx.Data, rng: jax.Array) -> mjx.Data:
-        """Reset the simulator to start a new episode."""
-        rng, pos_rng, vel_rng, mocap_rng = jax.random.split(rng, 4)
-        qpos = jax.random.uniform(pos_rng, (2,), minval=-0.29, maxval=0.29)
-        qvel = jax.random.uniform(vel_rng, (2,), minval=-0.5, maxval=0.5)
-        target = jax.random.uniform(mocap_rng, (2,), minval=-0.29, maxval=0.29)
-        mocap_pos = data.mocap_pos.at[0, 0:2].set(target)
+        """Reset with start on left side, goal on right side.
+
+        The wall obstacle at x=0 forces a left/right (above/below) path choice,
+        creating a clear multimodal planning problem.
+        """
+        rng, pos_rng, vel_rng, goal_rng = jax.random.split(rng, 4)
+
+        # Start: left side, y offset randomized
+        start_y = jax.random.uniform(pos_rng, (), minval=-0.08, maxval=0.08)
+        # qpos is joint displacement from body origin (-0.25, 0)
+        qpos = jnp.array([0.0, start_y])
+        qvel = jnp.zeros(2)
+
+        # Goal: right side, y offset randomized
+        goal_y = jax.random.uniform(goal_rng, (), minval=-0.08, maxval=0.08)
+        mocap_pos = data.mocap_pos.at[0, 0:2].set(jnp.array([0.25, 0]))
+        # mocap_pos = data.mocap_pos.at[0, 0:2].set(jnp.array([0.25, goal_y]))
+
         return data.replace(qpos=qpos, qvel=qvel, mocap_pos=mocap_pos)
 
     def get_obs(self, data: mjx.Data) -> jax.Array:
-        """Observe the position relative to the target and the velocity."""
-        pos = (
-            data.site_xpos[self.task.pointmass_id, 0:2] - data.mocap_pos[0, 0:2]
-        )
+        """Observe position relative to goal, velocity, and position relative to obstacle."""
+        particle_pos = data.site_xpos[self.task.pointmass_id, 0:2]
+        goal_pos = data.mocap_pos[0, 0:2]
+        obstacle_pos = data.mocap_pos[1, 0:2]
+
+        pos_to_goal = particle_pos - goal_pos
+        pos_to_obstacle = particle_pos - obstacle_pos
         vel = data.qvel[:]
-        return jnp.concatenate([pos, vel])
+        return jnp.concatenate([pos_to_goal, vel, pos_to_obstacle])
 
     @property
     def observation_size(self) -> int:
         """The size of the observation space."""
-        return 4
+        return 6

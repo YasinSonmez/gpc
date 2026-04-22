@@ -103,7 +103,7 @@ def add_proposal_geoms_to_scene(
     best_idx: int,
     num_policy_samples: int,
     pal: dict | None = None,
-    line_width: float = 0.01,
+    line_width: float = 0.002,
     num_display: int = 0,
 ):
     """Draw proposal trajectory lines in the MuJoCo scene.

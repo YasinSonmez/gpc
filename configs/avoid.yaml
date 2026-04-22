@@ -2,38 +2,51 @@
 
 # Environment
 task_name: avoid
-episode_length: 100
+episode_length: 200
 
 # Controller
-controller_type: predictive_sampling
-num_samples: 4
-noise_level: 0.05
-num_policy_samples: 2
+controller_type: cem
+num_elites: 16
+sigma_start: 2.0
+sigma_min: 0.05
+num_samples: 256
+iterations: 4
+noise_level: 0.2
+num_policy_samples: 1
+plan_horizon: 0.5
+strategy: "best"
 
 # Architecture
 architecture: mlp
 hidden_layers: [32, 32]
 
 # Training
-num_iters: 15
-num_envs: 64
+num_iters: 1
+num_envs: 16
 learning_rate: 0.001
-batch_size: 64
+batch_size: 4096
 num_epochs: 50
 exploration_noise_level: 0.0
 normalize_observations: true
 
 # Checkpointing & Evaluation
-checkpoint_every: 5
-num_eval_episodes: 3
-video_fps: 20
-video_quality: 5
-video_resolution: [480, 360]
+checkpoint_every: 10
+num_eval_episodes: 0
+video_fps: 30
+video_quality: 10
+video_resolution: [1920, 1080]
 
 # Logging & Visualization
 record_training_videos: true
-num_training_videos: 2
-record_eval_videos: true
+num_training_videos: 1
+record_eval_videos: false
 log_verbosity: 2
 
-experiment_name: null
+proposal_overlay: true
+proposal_video_ghost_count: 0  # Ghost bodies per frame (0=disabled)
+proposal_video_num_display: 32  # Max proposals to draw (0=all)
+proposal_video_trace_points: 10  # Horizon points per trajectory line (0=all)
+
+experiment_name: avoid_test_1_mppi
+wandb_project: spc_avoid
+use_wandb: false

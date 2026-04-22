@@ -15,6 +15,18 @@ from gpc.envs import SimulatorState, TrainingEnv
 from gpc.policy import Policy
 
 
+def _get_action_horizon(policy: Policy, task) -> int:
+    """Infer the action-sequence horizon for standalone evaluation."""
+    horizon = getattr(policy.model, "horizon", None)
+    if horizon is None:
+        horizon = getattr(task, "planning_horizon", None)
+    if horizon is None:
+        raise AttributeError(
+            "Could not infer action horizon from the policy model or task"
+        )
+    return int(horizon)
+
+
 def test_interactive(
     env: TrainingEnv,
     policy: Policy,
@@ -37,6 +49,7 @@ def test_interactive(
     """
     rng = jax.random.key(0)
     task = env.task
+    action_horizon = _get_action_horizon(policy, task)
 
     # Set up the policy
     policy = policy.replace(dt=inference_timestep)
@@ -52,7 +65,7 @@ def test_interactive(
         mj_data = mujoco.MjData(mj_model)
 
     # Initialize the action sequence
-    actions = jnp.zeros((task.planning_horizon, task.model.nu))
+    actions = jnp.zeros((action_horizon, task.model.nu))
 
     # Set up an observation function
     mjx_data = mjx.make_data(task.model)
@@ -131,6 +144,7 @@ def test_and_record(
 
     rng = jax.random.key(0)
     task = env.task
+    action_horizon = _get_action_horizon(policy, task)
 
     # Set up the policy
     policy = policy.replace(dt=inference_timestep)
@@ -153,7 +167,7 @@ def test_and_record(
         """Simulate a single episode."""
         # Initialize state
         state = env.init_state(rng)
-        actions = jnp.zeros((task.planning_horizon, task.model.nu))
+        actions = jnp.zeros((action_horizon, task.model.nu))
 
         def step_fn(carry: tuple, t: int) -> tuple:
             state, actions, rng = carry

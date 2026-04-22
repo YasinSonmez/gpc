@@ -1,0 +1,41 @@
+<mujoco model="avoid_particle">
+  <!--
+    Planar point-mass with a wall obstacle for multimodal path planning.
+    Based on the MJPC particle task.
+  -->
+  <option timestep="0.01" iterations="1" ls_iterations="4">
+    <flag contact="enable" eulerdamp="enable"/>
+  </option>
+
+  <worldbody>
+    <body name="goal" mocap="true" pos="0.25 0 0.01" quat="1 0 0 0">
+      <geom type="sphere" size=".005" contype="0" conaffinity="0" rgba="0 1 0 .7" />
+    </body>
+
+    <!-- Wall obstacle: box spanning y ∈ [-0.15, 0.15], forces left/right choice -->
+    <body name="obstacle" mocap="true" pos="0 0 0.0" quat="1 0 0 0">
+      <geom type="sphere" size="0.1" rgba="1 0.2 0.2 0.8"/>
+    </body>
+
+    <!-- Arena walls at ±0.3 -->
+    <geom name="wall_x" type="plane" pos="-.3 0 .02" zaxis="1 0 0" size=".02 .3 .02" />
+    <geom name="wall_y" type="plane" pos="0 -.3 .02" zaxis="0 1 0" size=".3 .02 .02" />
+    <geom name="wall_neg_x" type="plane" pos=".3 0 .02" zaxis="-1 0 0" size=".02 .3 .02" />
+    <geom name="wall_neg_y" type="plane" pos="0 .3 .02" zaxis="0 -1 0" size=".3 .02 .02" />
+
+    <body name="pointmass" pos="-0.25 0 .01">
+      <camera name="cam0" pos="0 -0.3 0.3" xyaxes="1 0 0 0 0.7 0.7" />
+      <joint name="root_x" type="slide" pos="0 0 0" axis="1 0 0"
+             limited="true" range="-0.1 0.6" damping="1"/>
+      <joint name="root_y" type="slide" pos="0 0 0" axis="0 1 0"
+             limited="true" range="-0.35 0.35" damping="1"/>
+      <geom name="pointmass" type="sphere" size=".01" mass=".3" />
+      <site name="pointmass" pos="0 0 0" size="0.01" />
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor name="x_motor" joint="root_x" gear="1" ctrllimited="true" ctrlrange="-1 1" />
+    <motor name="y_motor" joint="root_y" gear="1" ctrllimited="true" ctrlrange="-1 1" />
+  </actuator>
+</mujoco>
