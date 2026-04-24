@@ -290,13 +290,8 @@ class PolicyAugmentedController(SamplingBasedController):
 
     def get_action_sequence(self, params: PACParams) -> jax.Array:
         """Get the full control trajectory by interpolating knots."""
-        # Get the full interpolated control trajectory from base controller
-        # Use the interp_func to convert knots to control trajectory
-        tq = jnp.arange(self.ctrl_steps) * self.dt  # Query times
-        tk = params.tk  # Knot times
-        knots = params.mean  # Control knots
-        
-        # Interpolate each action dimension
-        controls = self.interp_func(tq, tk, knots.T).T
-        
+        tq = jnp.linspace(params.tk[0], params.tk[-1], self.ctrl_steps)
+        tk = params.tk
+        knots = params.mean[None, ...]
+        controls = self.interp_func(tq, tk, knots)[0]
         return controls

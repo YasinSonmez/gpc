@@ -164,6 +164,16 @@ def create_controller(env, config: TrainingConfig):
     else:
         raise ValueError(f"Unknown controller type: {config.controller_type}")
 
+    if config.chunked_spc:
+        from gpc.chunked_spc import ChunkedPAC
+        return ChunkedPAC(
+            base_ctrl,
+            config.num_policy_samples,
+            chunk_size=config.chunk_size,
+            temperature=config.chunk_temperature,
+            exploration_floor=config.exploration_floor,
+        )
+
     return PolicyAugmentedController(
         base_ctrl,
         config.num_policy_samples,

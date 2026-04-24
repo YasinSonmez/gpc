@@ -22,7 +22,7 @@ def test_augmented() -> None:
     )
     params = opt.init_params()
     params = params.replace(
-        policy_samples=jnp.ones((32, task.planning_horizon, task.model.nu))
+        policy_samples=jnp.ones((32, opt.num_knots, task.model.nu))
     )
 
     for _ in range(10):
@@ -37,8 +37,10 @@ def test_augmented() -> None:
     assert jnp.all(best_ctrl != 0.0)
     assert jnp.all(params.policy_samples == 1.0)
 
+    tq = jnp.linspace(params.tk[0], params.tk[-1], opt.ctrl_steps)
+    expected = opt.interp_func(tq, params.tk, params.mean[None, ...])[0]
     U = opt.get_action_sequence(params)
-    assert jnp.allclose(U, params.base_params.mean)
+    assert jnp.allclose(U, expected)
 
 
 if __name__ == "__main__":

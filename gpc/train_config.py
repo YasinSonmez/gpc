@@ -86,6 +86,10 @@ def train_with_config(
                     "num_epochs": config.num_epochs,
                     "num_policy_samples": config.num_policy_samples,
                     "controller_type": config.controller_type,
+                    "noise_level": config.noise_level,
+                    "chunked_spc": config.chunked_spc,
+                    "chunk_size": config.chunk_size,
+                    "chunk_temperature": config.chunk_temperature,
                 },
                 dir=str(exp_manager.exp_dir),
             )

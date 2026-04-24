@@ -97,6 +97,11 @@ class TrainingConfig:
     strategy: str = "policy"  # "policy" or "best" for simulation advancement
     save_spc_data: bool = False  # Custom flag for saving training data as .npz
     
+    # Chunked SPC settings
+    chunked_spc: bool = False
+    chunk_size: int = 4
+    chunk_temperature: float = 0.1
+
     # Value Function Integration
     use_value_function: bool = False
     value_hidden_layers: list[int] = field(default_factory=lambda: [256, 256, 256])
@@ -147,6 +152,11 @@ class TrainingConfig:
             raise ValueError("video_quality must be between 0 and 51")
         if self.log_verbosity not in [0, 1, 2]:
             raise ValueError("log_verbosity must be 0, 1, or 2")
+        if self.chunked_spc:
+            if self.chunk_size < 1:
+                raise ValueError("chunk_size must be at least 1")
+            if self.chunk_temperature <= 0:
+                raise ValueError("chunk_temperature must be positive")
 
 
 @dataclass

@@ -1,0 +1,33 @@
+# PushT K=12 chunked Boltzmann SPC ablation.
+#
+# Run:
+#   uv run python scripts/run_ablation.py \
+#     configs/examples/pusht_k12_chunked_ablation.yaml \
+#     --parallel 2 --yes
+#
+# Dry run:
+#   uv run python scripts/run_ablation.py \
+#     configs/examples/pusht_k12_chunked_ablation.yaml \
+#     --parallel 2 --dry-run
+
+base_config: configs/pusht_k12_chunked.yaml
+
+# Full suite: 3 noise levels x 4 chunk sizes x 4 temperatures = 48 runs.
+num_seeds: 1
+num_iters: 1
+
+# Global overrides applied to every generated training config.
+use_wandb: true
+wandb_project: gpc_pusht_chunked_ablation
+experiment_name: pusht_k12_chunked_ablation
+chunked_spc: true
+record_training_videos: true
+record_eval_videos: false
+proposal_overlay: true
+
+grid:
+  noise_level: [0.05, 0.1, 0.2]
+  chunk_size: [2, 3, 4, 6]
+  chunk_temperature: [0.01, 0.1, 1.0, 10.0]
+
+variants: {}

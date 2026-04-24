@@ -1,0 +1,27 @@
+program: scripts/run_ablation.py
+method: grid
+project: gpc_pusht_chunked_ablation
+name: pusht_k12_chunked_noise_chunk_temperature
+
+command:
+  - ${env}
+  - uv
+  - run
+  - python
+  - ${program}
+  - configs/examples/pusht_k12_chunked_ablation.yaml
+  - --num-iters
+  - "1"
+  - --output-dir
+  - experiments
+  - ${args}
+
+parameters:
+  seed:
+    values: [0]
+  noise_level:
+    values: [0.05, 0.1, 0.2]
+  chunk_size:
+    values: [2, 3, 4, 6]
+  chunk_temperature:
+    values: [0.01, 0.1, 1.0, 10.0]

@@ -1,0 +1,54 @@
+# PushT — K=4 Baseline: 256 samples × 4 iters = 1024 budget, horizon 0.5s
+
+task_name: pusht
+episode_length: 400
+
+controller_type: predictive_sampling
+num_knots: 6
+plan_horizon: 0.5
+num_samples: 256
+iterations: 4
+noise_level: 0.1
+num_policy_samples: 1
+strategy: "best"
+
+architecture: mlp
+hidden_layers: [256, 256, 256]
+
+num_iters: 1
+num_envs: 16
+learning_rate: 0.001
+batch_size: 4096
+num_epochs: 10
+exploration_noise_level: 0.0
+normalize_observations: true
+
+checkpoint_every: 10
+num_eval_episodes: 0
+video_fps: 30
+video_quality: 3
+video_resolution: [1280, 720]
+
+use_value_function: false
+value_learning_rate: 0.001
+iql_tau: 0.1
+discount_factor: 0.99
+value_hidden_layers: [256, 256, 256]
+polyak_tau: 0.005
+value_alpha_start: 0.0
+value_alpha_end: 0.01
+value_train_epochs: 20
+
+record_training_videos: true
+num_training_videos: 1
+record_eval_videos: false
+log_verbosity: 2
+
+proposal_overlay: true
+proposal_video_ghost_count: 0
+proposal_video_num_display: 32
+proposal_video_trace_points: 10
+
+experiment_name: pusht_k6_baseline
+use_wandb: true
+wandb_project: gpc_pusht_chunked
