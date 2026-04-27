@@ -1,21 +1,21 @@
-# Avoid Navigation Configuration
+# Avoid Navigation Configuration: U-Trap Variant
 
 # Environment
 task_name: avoid
-task_variant: sphere
+task_variant: u_trap
 episode_length: 200
 
 # Controller
 controller_type: cem
 num_elites: 16
 sigma_start: 2.0
-sigma_min: 0.05
+sigma_min: 0.025
 num_samples: 256
 iterations: 4
 noise_level: 0.2
 num_policy_samples: 1
-num_knots: 4
-plan_horizon: 0.5
+num_knots: 12
+plan_horizon: 1.5
 strategy: "best"
 
 # Architecture
@@ -45,10 +45,10 @@ record_eval_videos: false
 log_verbosity: 2
 
 proposal_overlay: true
-proposal_video_ghost_count: 0  # Ghost bodies per frame (0=disabled)
-proposal_video_num_display: 32  # Max proposals to draw (0=all)
-proposal_video_trace_points: 50  # Horizon points per trajectory line (0=all)
+proposal_video_ghost_count: 0
+proposal_video_num_display: 32
+proposal_video_trace_points: 50
 
-experiment_name: avoid_sphere
+experiment_name: avoid_u_trap
 wandb_project: spc_avoid
 use_wandb: true

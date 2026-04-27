@@ -1,6 +1,6 @@
-<mujoco model="avoid_particle">
+<mujoco model="avoid_particle_u_trap">
   <!--
-    Planar point-mass with a central sphere obstacle for multimodal path planning.
+    Planar point-mass with a U-shaped obstacle open toward the start state.
     Based on the MJPC particle task.
   -->
   <option timestep="0.01" iterations="1" ls_iterations="4">
@@ -12,12 +12,30 @@
       <geom type="sphere" size=".005" contype="0" conaffinity="0" rgba="0 1 0 .7" />
     </body>
 
-    <!-- Sphere obstacle in the middle. -->
-    <body name="obstacle" mocap="true" pos="0 0 0.0" quat="1 0 0 0">
-      <geom name="obstacle_sphere" type="sphere" size="0.1" rgba="1 0.2 0.2 0.8"/>
+    <body name="obstacle" mocap="true" pos="0.04 0 0.0" quat="1 0 0 0">
+      <geom
+        name="obstacle_trap_back"
+        type="box"
+        pos="0.04 0 0"
+        size="0.02 0.10 0.03"
+        rgba="1 0.2 0.2 0.8"
+      />
+      <geom
+        name="obstacle_trap_top_arm"
+        type="box"
+        pos="-0.01 0.10 0"
+        size="0.05 0.02 0.03"
+        rgba="1 0.2 0.2 0.8"
+      />
+      <geom
+        name="obstacle_trap_bottom_arm"
+        type="box"
+        pos="-0.01 -0.10 0"
+        size="0.05 0.02 0.03"
+        rgba="1 0.2 0.2 0.8"
+      />
     </body>
 
-    <!-- Arena walls at ±0.3 -->
     <geom name="wall_x" type="plane" pos="-.3 0 .02" zaxis="1 0 0" size=".02 .3 .02" />
     <geom name="wall_y" type="plane" pos="0 -.3 .02" zaxis="0 1 0" size=".3 .02 .02" />
     <geom name="wall_neg_x" type="plane" pos=".3 0 .02" zaxis="-1 0 0" size=".02 .3 .02" />

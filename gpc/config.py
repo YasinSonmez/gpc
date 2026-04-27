@@ -12,6 +12,7 @@ class TrainingConfig:
     
     # Environment settings
     task_name: str = "cart_pole"
+    task_variant: Optional[str] = None
     episode_length: int = 200
     action_repeat: int = 1  # Number of simulation steps per control step
     terminate_when_unhealthy: bool = False  # Early termination if agent falls (e.g. Ant)
