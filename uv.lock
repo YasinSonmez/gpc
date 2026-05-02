@@ -514,6 +514,7 @@ dependencies = [
     { name = "cloudpickle" },
     { name = "evosax" },
     { name = "flax" },
+    { name = "hj-reachability" },
     { name = "hydrax" },
     { name = "imageio" },
     { name = "jax", extra = ["cuda12"] },
@@ -536,6 +537,7 @@ requires-dist = [
     { name = "cloudpickle", specifier = "==3.1.0" },
     { name = "evosax", specifier = ">=0.1.6" },
     { name = "flax", specifier = ">=0.10.0" },
+    { name = "hj-reachability", specifier = ">=0.7.0" },
     { name = "hydrax", git = "https://github.com/Beau-Coup/hydrax.git" },
     { name = "imageio", specifier = "==2.27" },
     { name = "jax", extras = ["cuda12"], specifier = ">=0.4.35" },
@@ -710,6 +712,20 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/00/b3/7bc1ff91d1ac18420b7ad1e169b618b27c00001b96310a89f8a9294fe509/hf_xet-1.3.2-cp37-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:06cdbde243c85f39a63b28e9034321399c507bcd5e7befdd17ed2ccc06dfe14e", size = 4398020, upload-time = "2026-02-27T17:26:03.977Z" },
     { url = "https://files.pythonhosted.org/packages/2b/0b/99bfd948a3ed3620ab709276df3ad3710dcea61976918cce8706502927af/hf_xet-1.3.2-cp37-abi3-win_amd64.whl", hash = "sha256:9298b47cce6037b7045ae41482e703c471ce36b52e73e49f71226d2e8e5685a1", size = 3641624, upload-time = "2026-02-27T17:26:13.542Z" },
     { url = "https://files.pythonhosted.org/packages/cc/02/9a6e4ca1f3f73a164c0cd48e41b3cc56585dcc37e809250de443d673266f/hf_xet-1.3.2-cp37-abi3-win_arm64.whl", hash = "sha256:83d8ec273136171431833a6957e8f3af496bee227a0fe47c7b8b39c106d1749a", size = 3503976, upload-time = "2026-02-27T17:26:12.123Z" },
+]
+
+[[package]]
+name = "hj-reachability"
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "flax" },
+    { name = "jax" },
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c2/5d/ab3f2d9b3b78466af78af8855a297d04a18ddd07854d74c3a14e366cbd6d/hj_reachability-0.7.0.tar.gz", hash = "sha256:f90d4aa25eba1fa661aa7a311ec4924274fa1a0074cbb57e1495202875d37335", size = 19109, upload-time = "2024-10-15T19:09:14.696Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d2/b1/76bf23b54a8846822572f8b97a488b77b0fea06def1277c118a52026c6d4/hj_reachability-0.7.0-py3-none-any.whl", hash = "sha256:22a0bc69203037aafd7cbc40585bc023d9dab2b259d623fe5cd3f8ed5c8965b1", size = 23333, upload-time = "2024-10-15T19:09:13.116Z" },
 ]
 
 [[package]]

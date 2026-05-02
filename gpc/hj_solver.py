@@ -307,7 +307,7 @@ def _plot_pair(
     value_masked = np.array(value_xy, copy=True)
     value_masked[inside_mask] = np.nan
 
-    cmap = plt.get_cmap("cividis").copy()
+    cmap = plt.get_cmap("magma").copy()
     cmap.set_bad(color=(1.0, 1.0, 1.0, 0.96))
     outside_vals = value_masked[np.isfinite(value_masked)]
     if outside_vals.size > 0:
@@ -358,7 +358,7 @@ def _plot_pair(
     fig.colorbar(pcm1, ax=axes[1], fraction=0.046)
 
     # Sparser, cleaner arrows for publication-quality readability.
-    step = max(2, len(x_vec) // 12)
+    step = max(2, len(x_vec) // 24)
     Xq, Yq = np.meshgrid(x_vec[::step], y_vec[::step], indexing="xy")
     Uq = np.array(ux_xy[::step, ::step], copy=True)
     Vq = np.array(uy_xy[::step, ::step], copy=True)
@@ -370,15 +370,15 @@ def _plot_pair(
         Yq,
         Uq,
         Vq,
-        color="#1f2937",
-        alpha=0.85,
-        width=0.0026,
+        color="w",
+        # alpha=0.85,
+        # width=0.0026,
         scale_units="xy",
-        scale=18.0,
+        scale=50,
         pivot="mid",
-        headwidth=3.4,
-        headlength=4.6,
-        headaxislength=4.2,
+        # headwidth=1.4,
+        # headlength=2.6,
+        # headaxislength=0.6,
         zorder=4,
     )
 
