@@ -13,6 +13,7 @@ import os
 os.environ.setdefault("MUJOCO_GL", "egl")  # Set before any MuJoCo imports
 
 import argparse
+import cloudpickle
 import sys
 from pathlib import Path
 
@@ -42,10 +43,10 @@ from gpc.envs import (
     WalkerGymEnv,
 )
 from gpc.experiment import ExperimentManager
-from gpc.policy import Policy
+from gpc.hj_solver import solve_avoid_hj_binary
 from gpc.sweep import expand_config_sweep, print_sweep_summary
 from gpc.testing import test_and_record, test_interactive
-from gpc.train_config import train_with_config
+from gpc.train_config import evaluate_hj_policy_with_spc, train_with_config
 
 # Task name to environment class mapping
 TASK_ENVS = {
@@ -83,6 +84,10 @@ def create_environment(config: TrainingConfig):
         "render_resolution": config.video_resolution,
         "planning_horizon": config.num_knots,
     }
+
+    # Task-specific variants (e.g. avoid sphere/u_trap/vertical_block)
+    if config.task_variant is not None and config.task_name == "avoid":
+        kwargs["variant"] = config.task_variant
 
     if config.task_name in ("ant_gym", "humanoid_gym", "half_cheetah_gym"):
         if hasattr(config, "terminate_when_unhealthy"):
@@ -267,13 +272,31 @@ def train_command(args):
         # Create experiment manager
         exp_manager = ExperimentManager(config, base_dir=args.output_dir)
 
-        # Create environment, controller, and network
+        # Create environment and controller
         env = create_environment(config)
         ctrl = create_controller(env, config)
-        net = create_network(env, config)
-
-        # Train
-        policy = train_with_config(env, ctrl, net, config, exp_manager)
+        if config.method == "hj":
+            hj_out_dir = exp_manager.exp_dir / "hj"
+            policy, _ = solve_avoid_hj_binary(env, config, hj_out_dir)
+            policy.save(exp_manager.get_policy_path())
+            eval_result = evaluate_hj_policy_with_spc(
+                env=env,
+                ctrl=ctrl,
+                policy=policy,
+                config=config,
+                exp_manager=exp_manager,
+            )
+            print(
+                f"HJ episode cost: {eval_result['hj_episode_cost_mean']:.4f} ± "
+                f"{eval_result['hj_episode_cost_std']:.4f}"
+            )
+            print(
+                f"SPC proposal cost: {eval_result['spc_proposal_cost_mean']:.4f} ± "
+                f"{eval_result['spc_proposal_cost_std']:.4f}"
+            )
+        else:
+            net = create_network(env, config)
+            policy = train_with_config(env, ctrl, net, config, exp_manager)
 
         print("\n✓ Training complete!")
         print(f"  Policy: {exp_manager.get_policy_path()}")
@@ -327,7 +350,8 @@ def eval_command(args):
         return 1
 
     print(f"Loading policy from {policy_path}")
-    policy = Policy.load(policy_path)
+    with open(policy_path, "rb") as f:
+        policy = cloudpickle.load(f)
 
     # Create environment
     env = create_environment(config)

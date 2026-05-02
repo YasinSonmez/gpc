@@ -32,6 +32,7 @@ dependencies = [
     "imageio==2.27",
     "warp-lang>=1.10.1",
     "wandb>=0.25.1",
+    "hj-reachability>=0.7.0",
 ]
 
 [tool.ruff]

@@ -1,0 +1,39 @@
+task_name: avoid
+task_variant: vertical_block
+method: hj
+seed: 0
+
+episode_length: 200
+num_envs: 16
+num_policy_samples: 1
+strategy: "policy"
+
+controller_type: cem
+num_samples: 256
+iterations: 4
+num_elites: 16
+sigma_start: 2.0
+sigma_min: 0.025
+noise_level: 0.2
+num_knots: 12
+plan_horizon: 1.0
+
+hj_grid_size: 50
+hj_velocity_bound: 1.5
+hj_num_time_slices: 41
+hj_solver_accuracy: high
+hj_control_weight: 0.1
+hj_obstacle_binary_weight: 100.0
+hj_eval_episodes: 64
+hj_save_chunk_size0: 8
+
+record_training_videos: true
+num_training_videos: 1
+proposal_overlay: true
+proposal_video_trace_points: 50
+video_fps: 30
+video_quality: 10
+video_resolution: [1920, 1080]
+
+experiment_name: hj_avoid_binary_vertical_block
+use_wandb: false

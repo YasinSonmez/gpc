@@ -13,6 +13,7 @@ class TrainingConfig:
     # Environment settings
     task_name: str = "cart_pole"
     task_variant: Optional[str] = None
+    method: str = "gpc"  # "gpc" or "hj"
     episode_length: int = 200
     action_repeat: int = 1  # Number of simulation steps per control step
     terminate_when_unhealthy: bool = False  # Early termination if agent falls (e.g. Ant)
@@ -130,6 +131,16 @@ class TrainingConfig:
     inference_dropout_rate: float = 0.1 # Dropout probability when inference_dropout=True (DenoisingMLP only).
     value_buffer_window: int = 0  # Number of recent iterations to keep in buffer (0 = keep all)
     value_train_epochs: int = 4
+
+    # HJ (single-mode: finite horizon + binary obstacle cost)
+    hj_grid_size: int = 50
+    hj_velocity_bound: float = 1.5
+    hj_num_time_slices: int = 41
+    hj_solver_accuracy: str = "high"  # low / medium / high / very_high
+    hj_control_weight: float = 0.1
+    hj_obstacle_binary_weight: float = 100.0
+    hj_eval_episodes: int = 64
+    hj_save_chunk_size0: int = 8
     
     @classmethod
     def from_yaml(cls, path: str | Path) -> "TrainingConfig":
@@ -158,6 +169,12 @@ class TrainingConfig:
                 raise ValueError("chunk_size must be at least 1")
             if self.chunk_temperature <= 0:
                 raise ValueError("chunk_temperature must be positive")
+        if self.method not in ["gpc", "hj"]:
+            raise ValueError("method must be 'gpc' or 'hj'")
+        if self.hj_solver_accuracy not in ["low", "medium", "high", "very_high"]:
+            raise ValueError(
+                "hj_solver_accuracy must be one of: low, medium, high, very_high"
+            )
 
 
 @dataclass

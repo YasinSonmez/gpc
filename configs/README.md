@@ -20,12 +20,28 @@ python run_experiment.py eval --task cart_pole
 - `cart_pole.yaml` - Cart-pole swing-up task (simple, fast)
 - `particle.yaml` - Particle navigation (very simple, for testing)
 - `walker.yaml` - Walker locomotion (more complex, slower)
+- `hj_avoid_binary_sphere.yaml` - HJ avoid solve/eval (sphere)
+- `hj_avoid_binary_vertical_block.yaml` - HJ avoid solve/eval (vertical block)
+- `hj_avoid_binary_u_trap.yaml` - HJ avoid solve/eval (U-trap)
 
 ## Config Parameters
 
 ### Environment
 - `task_name`: Name of the task (must match environment in gpc.envs)
+- `method`: `"gpc"` (default training) or `"hj"` (HJ solve + table policy eval)
 - `episode_length`: Number of simulation steps per episode
+
+### HJ (method = "hj")
+- `hj_grid_size`: Grid size per dimension (N -> N^4 states for avoid)
+- `hj_num_time_slices`: Number of backward-time slices
+- `hj_solver_accuracy`: `low|medium|high|very_high`
+- `hj_velocity_bound`: Velocity domain bound for grid
+- `hj_control_weight`: Running control penalty weight
+- `hj_obstacle_binary_weight`: Binary in-obstacle penalty
+- `hj_eval_episodes`: Number of parallel-rollout eval episodes
+
+HJ video proposal overlays use the same controller rollout stack as SPC:
+the first `num_policy_samples` traces are HJ-policy proposals, and the rest are SPC proposals.
 
 ### Controller
 - `controller_type`: "predictive_sampling" or "evosax"

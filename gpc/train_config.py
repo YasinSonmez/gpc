@@ -18,6 +18,7 @@ from gpc.augmented import PolicyAugmentedController
 from gpc.config import TrainingConfig
 from gpc.envs import SimulatorState, TrainingEnv
 from gpc.experiment import ExperimentManager
+from gpc.hj_solver import HJTablePolicy
 from gpc.policy import Policy
 from gpc.training import fit_policy, simulate_episode
 from gpc.value_function import ValueFunctionTrainer as ValueTrainer
@@ -1193,3 +1194,134 @@ def _print_training_header(
     print(f"  Video Quality:       {config.video_quality} (CRF)")
     
     print(f"\n{'='*80}\n")
+
+
+def evaluate_hj_policy_with_spc(
+    env: TrainingEnv,
+    ctrl: PolicyAugmentedController,
+    policy: HJTablePolicy,
+    config: TrainingConfig,
+    exp_manager: ExperimentManager,
+) -> dict:
+    """Evaluate HJ policy with the same parallel simulate_episode pipeline."""
+    if config.num_policy_samples < 1:
+        raise ValueError("HJ mode requires num_policy_samples >= 1")
+
+    rng = jax.random.key(config.seed)
+    num_total = int(config.hj_eval_episodes)
+    num_batch = int(config.num_envs)
+    num_batches = int(np.ceil(num_total / num_batch))
+
+    @nnx.jit
+    def jit_simulate_eval(rng_in: jax.Array):
+        rngs = jax.random.split(rng_in, config.num_envs)
+        return jax.vmap(
+            simulate_episode,
+            in_axes=(None, None, None, None, 0, None, None, None, None, None, None, None),
+        )(
+            env,
+            ctrl,
+            policy,
+            0.0,
+            rngs,
+            "policy",
+            None,
+            1.0,
+            None,
+            0.0,
+            jnp.array(1.0),
+            config.proposal_video_trace_points,
+        )
+
+    all_spc = []
+    all_hj = []
+    all_ep = []
+    first_qpos = None
+    first_prop = None
+
+    for b in range(num_batches):
+        rng, sim_rng = jax.random.split(rng)
+        out = jit_simulate_eval(sim_rng)
+        _, _, _, J_spc, J_policy, J_inst, _, _, _, qpos, prop_costs, prop_best, prop_traces = out
+
+        all_spc.append(np.asarray(J_spc))
+        all_hj.append(np.asarray(J_policy))
+        all_ep.append(np.asarray(jnp.sum(J_inst, axis=1)))
+
+        if b == 0:
+            first_qpos = np.asarray(qpos)
+            first_prop = (
+                np.asarray(prop_traces),
+                np.asarray(prop_costs),
+                np.asarray(prop_best),
+                np.asarray(J_inst),
+            )
+
+    J_spc_all = np.concatenate(all_spc, axis=0)[:num_total]
+    J_hj_all = np.concatenate(all_hj, axis=0)[:num_total]
+    J_ep_all = np.concatenate(all_ep, axis=0)[:num_total]
+
+    result = {
+        "hj_episode_cost_mean": float(np.mean(J_ep_all)),
+        "hj_episode_cost_std": float(np.std(J_ep_all)),
+        "hj_episode_costs": J_ep_all.tolist(),
+        "spc_proposal_cost_mean": float(np.mean(J_spc_all)),
+        "spc_proposal_cost_std": float(np.std(J_spc_all)),
+        "spc_proposal_costs": J_spc_all.tolist(),
+        "hj_proposal_cost_mean": float(np.mean(J_hj_all)),
+        "hj_proposal_cost_std": float(np.std(J_hj_all)),
+        "hj_proposal_costs": J_hj_all.tolist(),
+        "num_eval_episodes": int(num_total),
+        "proposal_semantics": {
+            "description": (
+                "Proposal overlays come from controller optimize() rollouts. "
+                "The first num_policy_samples proposals are policy proposals "
+                "(HJ in method=hj), remaining proposals are SPC samples."
+            ),
+            "num_policy_samples": int(ctrl.num_policy_samples),
+            "strategy": "policy",
+        },
+    }
+
+    with open(exp_manager.exp_dir / "comparison.json", "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2)
+
+    if config.record_training_videos and first_qpos is not None:
+        num_videos = min(config.num_training_videos, first_qpos.shape[0])
+        trace_sites, costs, best_idx, inst_costs = first_prop
+        for vid_idx in range(num_videos):
+            qpos_ep = first_qpos[vid_idx]
+            if config.proposal_overlay:
+                frames = env.render_qpos(
+                    qpos_ep,
+                    fps=config.video_fps,
+                    proposal_data={
+                        "trace_sites": trace_sites[vid_idx],
+                        "costs": costs[vid_idx],
+                        "best_idx": best_idx[vid_idx],
+                        "inst_costs": inst_costs[vid_idx],
+                        "num_policy_samples": ctrl.num_policy_samples,
+                        "num_display": config.proposal_video_num_display,
+                        "ghost_count": 0,
+                        "ghost_steps": config.proposal_video_ghost_steps,
+                        "palette": config.proposal_video_palette,
+                    },
+                )
+            else:
+                frames = env.render_qpos(qpos_ep, fps=config.video_fps)
+            if frames.dtype != np.uint8:
+                frames = (frames * 255).astype(np.uint8)
+            frames = np.ascontiguousarray(frames)
+            frames_for_save = (
+                frames.transpose(0, 2, 3, 1) if frames.shape[1] == 3 else frames
+            )
+            video_path = exp_manager.get_video_path(iteration=0, prefix=f"hj_ep{vid_idx}")
+            exp_manager.save_video(
+                frames_for_save,
+                video_path,
+                fps=config.video_fps,
+                quality=config.video_quality,
+                resolution=config.video_resolution,
+            )
+
+    return result
