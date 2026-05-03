@@ -31,7 +31,6 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 from flax import nnx
-from hydrax.algs.cem import CEMParams
 from matplotlib import patches
 
 from gpc.augmented import PACParams, PolicyAugmentedController
@@ -157,6 +156,36 @@ def load_hj_artifacts(hj_dir: Path, config: TrainingConfig, env) -> HJValueArtif
         grad_values=grad_values,
         policy=policy,
         metadata=metadata,
+    )
+
+
+def perturb_hj_values(
+    artifacts: HJValueArtifacts,
+    config: TrainingConfig,
+    noise_scale: float,
+    noise_seed: int,
+) -> HJValueArtifacts:
+    """Add Gaussian noise to V and recompute grad(V)."""
+    if noise_scale <= 0.0:
+        return artifacts
+
+    values_np = np.asarray(artifacts.values, dtype=np.float32)
+    value_std = float(np.std(values_np)) + 1e-6
+    rng = np.random.default_rng(int(noise_seed))
+    noise = rng.standard_normal(values_np.shape, dtype=np.float32)
+    noisy_values = values_np + float(noise_scale) * value_std * noise
+    noisy_values_jax = jnp.asarray(noisy_values, dtype=jnp.float32)
+
+    solver_settings = hj.SolverSettings.with_accuracy(config.hj_solver_accuracy)
+    noisy_grad_values = artifacts.grid.grad_values(
+        noisy_values_jax, upwind_scheme=solver_settings.upwind_scheme
+    )
+    return HJValueArtifacts(
+        grid=artifacts.grid,
+        values=noisy_values_jax,
+        grad_values=noisy_grad_values,
+        policy=artifacts.policy,
+        metadata={**artifacts.metadata, "value_noise_scale": float(noise_scale)},
     )
 
 
@@ -412,6 +441,96 @@ def save_plots(
     plt.close(fig)
 
 
+def save_noise_matrix_plots(
+    out_dir: Path,
+    case_names: list[str],
+    noise_levels: list[float],
+    results_by_noise: dict[float, dict[str, dict[str, Any]]],
+    qpos_by_noise_case: dict[tuple[float, str], np.ndarray],
+    env,
+    metadata: dict[str, Any],
+) -> None:
+    variant = str(metadata.get("task_variant", "u_trap"))
+    means = np.array(
+        [
+            [results_by_noise[n][c]["episode_cost_mean"] for c in case_names]
+            for n in noise_levels
+        ],
+        dtype=np.float32,
+    )
+
+    fig, ax = plt.subplots(figsize=(8.0, 5.0))
+    im = ax.imshow(means, aspect="auto", cmap="viridis")
+    ax.set_xticks(np.arange(len(case_names)), labels=case_names)
+    ax.set_yticks(np.arange(len(noise_levels)), labels=[f"{n:.3f}" for n in noise_levels])
+    ax.set_xlabel("Case")
+    ax.set_ylabel("Value-noise scale")
+    ax.set_title(f"Avoid {variant}: mean episode cost by noise and method")
+    for i in range(means.shape[0]):
+        for j in range(means.shape[1]):
+            ax.text(j, i, f"{means[i, j]:.2f}", ha="center", va="center", color="white", fontsize=8)
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Mean episode cost")
+    fig.tight_layout()
+    fig.savefig(out_dir / "noise_episode_cost_matrix.png", dpi=200)
+    plt.close(fig)
+
+    pointmass_body_id = env.task.mj_model.body("pointmass").id
+    offset = np.asarray(env.task.mj_model.body_pos[pointmass_body_id, :2], dtype=np.float32)
+    goal = np.asarray(metadata["goal_pos"], dtype=np.float32)
+    obstacle = np.asarray(metadata["obstacle_pos"], dtype=np.float32)
+
+    fig, axes = plt.subplots(
+        len(noise_levels),
+        len(case_names),
+        figsize=(4.2 * len(case_names), 3.2 * len(noise_levels)),
+        sharex=True,
+        sharey=True,
+    )
+    axes = np.asarray(axes)
+    if axes.ndim == 1:
+        if len(noise_levels) == 1:
+            axes = axes[None, :]
+        else:
+            axes = axes[:, None]
+
+    for i, noise in enumerate(noise_levels):
+        for j, case_name in enumerate(case_names):
+            ax = axes[i, j]
+            qpos = qpos_by_noise_case[(noise, case_name)]
+            pos = qpos[: min(8, len(qpos)), :, :2] + offset[None, None, :]
+            for traj in pos:
+                ax.plot(traj[:, 0], traj[:, 1], alpha=0.55, linewidth=1.0, color="#1f77b4")
+            add_obstacle_patch(ax, obstacle, variant)
+            ax.plot(goal[0], goal[1], marker="*", color="gold", markeredgecolor="k", markersize=10)
+            if i == 0:
+                ax.set_title(case_name)
+            if j == 0:
+                ax.set_ylabel(f"noise={noise:.3f}\ny")
+            else:
+                ax.set_ylabel("y")
+            ax.set_aspect("equal", adjustable="box")
+            ax.grid(alpha=0.2)
+            m = results_by_noise[noise][case_name]["episode_cost_mean"]
+            ax.text(
+                0.02,
+                0.98,
+                f"mean={m:.2f}",
+                transform=ax.transAxes,
+                va="top",
+                ha="left",
+                fontsize=8,
+                bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "none"},
+            )
+            if i == len(noise_levels) - 1:
+                ax.set_xlabel("x")
+
+    fig.suptitle(f"Avoid {variant}: trajectory matrix (rows=noise, cols=method)", y=1.0)
+    fig.tight_layout()
+    fig.savefig(out_dir / "noise_trajectory_matrix.png", dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
 def write_report(
     out_dir: Path,
     config: TrainingConfig,
@@ -478,6 +597,58 @@ def write_report(
     (out_dir / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_noise_report(
+    out_dir: Path,
+    config: TrainingConfig,
+    metadata: dict[str, Any],
+    noise_levels: list[float],
+    case_names: list[str],
+    results_by_noise: dict[float, dict[str, dict[str, Any]]],
+) -> None:
+    variant = str(metadata.get("task_variant", config.task_variant))
+    lines = [
+        f"# Avoid {variant} V-Noise Sensitivity (Exp1 + Exp4)",
+        "",
+        "## Setup",
+        "",
+        f"- Short horizon: `plan_horizon={config.plan_horizon}`, `num_knots={config.num_knots}`.",
+        f"- Episodes per case: `{config.hj_eval_episodes}`.",
+        "- Rows are increasing noise injected into the HJ value table.",
+        "- Columns are `spc_short`, `spc_hjV`, `spc_hjV_grad`.",
+        "",
+        "## Mean Episode Cost Matrix",
+        "",
+        "| noise scale | spc_short | spc_hjV | spc_hjV_grad | hjV-short | grad-short | grad-hjV |",
+        "|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for noise in noise_levels:
+        row = results_by_noise[noise]
+        short = row["spc_short"]["episode_cost_mean"]
+        hjv = row["spc_hjV"]["episode_cost_mean"]
+        grad = row["spc_hjV_grad"]["episode_cost_mean"]
+        lines.append(
+            f"| {noise:.4f} | {short:.4f} | {hjv:.4f} | {grad:.4f} | {hjv - short:.4f} | {grad - short:.4f} | {grad - hjv:.4f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Figures",
+            "",
+            "- `noise_episode_cost_matrix.png`: mean-cost heatmap (rows=noise, cols=method).",
+            "- `noise_trajectory_matrix.png`: 5x3 trajectory panel (rows=noise, cols=method).",
+        ]
+    )
+    (out_dir / "noise_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def parse_noise_levels(text: str) -> list[float]:
+    values = [float(x.strip()) for x in text.split(",") if x.strip()]
+    if not values:
+        raise ValueError("noise-level list must be non-empty")
+    values = [max(0.0, v) for v in values]
+    return values
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=Path("configs/avoid_u_trap.yaml"))
@@ -493,6 +664,9 @@ def main() -> int:
     parser.add_argument("--value-alpha", type=float, default=1.0)
     parser.add_argument("--grad-step", type=float, default=0.25)
     parser.add_argument("--grad-clip-norm", type=float, default=2.0)
+    parser.add_argument("--noise-analysis", action="store_true")
+    parser.add_argument("--noise-levels", type=str, default="0.0,0.05,0.1,0.2,0.35")
+    parser.add_argument("--noise-seed", type=int, default=123)
     args = parser.parse_args()
 
     out_dir = args.out_dir / time.strftime("%Y%m%d_%H%M%S")
@@ -503,47 +677,131 @@ def main() -> int:
     artifacts = load_hj_artifacts(args.hj_dir, config, env)
 
     case_names = ["spc_short", "spc_hjV", "spc_hjV_grad"]
-    results: list[dict[str, Any]] = []
-    qpos_by_case: dict[str, np.ndarray] = {}
-    for case_name in case_names:
-        print(f"Running {case_name} ...", flush=True)
-        result, qpos = evaluate_case(
+    if not args.noise_analysis:
+        results: list[dict[str, Any]] = []
+        qpos_by_case: dict[str, np.ndarray] = {}
+        for case_name in case_names:
+            print(f"Running {case_name} ...", flush=True)
+            result, qpos = evaluate_case(
+                config=config,
+                env=env,
+                artifacts=artifacts,
+                case_name=case_name,
+                value_alpha=float(args.value_alpha),
+                grad_step=float(args.grad_step),
+                grad_clip_norm=float(args.grad_clip_norm),
+            )
+            results.append(result)
+            qpos_by_case[case_name] = qpos
+            np.savez_compressed(out_dir / f"{case_name}_qpos.npz", qpos=qpos)
+            print(
+                f"  mean={result['episode_cost_mean']:.4f}, std={result['episode_cost_std']:.4f}, "
+                f"success={result['success_rate']:.3f}, collision={result['collision_rate']:.3f}",
+                flush=True,
+            )
+
+        costs = {r["case_name"]: np.asarray(r["episode_costs"]) for r in results}
+        comparisons = {
+            "spc_hjV - spc_short": paired_delta_stats(costs["spc_hjV"], costs["spc_short"]),
+            "spc_hjV_grad - spc_short": paired_delta_stats(costs["spc_hjV_grad"], costs["spc_short"]),
+            "spc_hjV_grad - spc_hjV": paired_delta_stats(costs["spc_hjV_grad"], costs["spc_hjV"]),
+        }
+
+        payload = {
+            "mode": "single",
+            "config": config.__dict__,
+            "hj_dir": str(args.hj_dir),
+            "cases": case_names,
+            "results": results,
+            "comparisons": comparisons,
+        }
+        with open(out_dir / "results.json", "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+        save_plots(out_dir, results, qpos_by_case, env, artifacts.metadata)
+        write_report(out_dir, config, artifacts.metadata, args.hj_dir, results, comparisons)
+    else:
+        noise_levels = parse_noise_levels(args.noise_levels)
+        results_by_noise: dict[float, dict[str, dict[str, Any]]] = {}
+        qpos_by_noise_case: dict[tuple[float, str], np.ndarray] = {}
+
+        print("Running spc_short baseline once ...", flush=True)
+        short_result, short_qpos = evaluate_case(
             config=config,
             env=env,
             artifacts=artifacts,
-            case_name=case_name,
+            case_name="spc_short",
             value_alpha=float(args.value_alpha),
             grad_step=float(args.grad_step),
             grad_clip_norm=float(args.grad_clip_norm),
         )
-        results.append(result)
-        qpos_by_case[case_name] = qpos
-        np.savez_compressed(out_dir / f"{case_name}_qpos.npz", qpos=qpos)
-        print(
-            f"  mean={result['episode_cost_mean']:.4f}, std={result['episode_cost_std']:.4f}, "
-            f"success={result['success_rate']:.3f}, collision={result['collision_rate']:.3f}",
-            flush=True,
+        for noise in noise_levels:
+            row: dict[str, dict[str, Any]] = {"spc_short": short_result}
+            results_by_noise[noise] = row
+            qpos_by_noise_case[(noise, "spc_short")] = short_qpos
+
+            noisy_artifacts = perturb_hj_values(
+                artifacts=artifacts,
+                config=config,
+                noise_scale=float(noise),
+                noise_seed=int(args.noise_seed + int(round(1000 * noise))),
+            )
+
+            for case_name in ["spc_hjV", "spc_hjV_grad"]:
+                print(f"Running noise={noise:.4f}, case={case_name} ...", flush=True)
+                result, qpos = evaluate_case(
+                    config=config,
+                    env=env,
+                    artifacts=noisy_artifacts,
+                    case_name=case_name,
+                    value_alpha=float(args.value_alpha),
+                    grad_step=float(args.grad_step),
+                    grad_clip_norm=float(args.grad_clip_norm),
+                )
+                row[case_name] = result
+                qpos_by_noise_case[(noise, case_name)] = qpos
+                np.savez_compressed(
+                    out_dir / f"noise_{noise:.4f}_{case_name}_qpos.npz",
+                    qpos=qpos,
+                )
+                print(
+                    f"  mean={result['episode_cost_mean']:.4f}, std={result['episode_cost_std']:.4f}, "
+                    f"success={result['success_rate']:.3f}, collision={result['collision_rate']:.3f}",
+                    flush=True,
+                )
+
+        payload = {
+            "mode": "noise_analysis",
+            "config": config.__dict__,
+            "hj_dir": str(args.hj_dir),
+            "cases": case_names,
+            "noise_levels": noise_levels,
+            "results_by_noise": {
+                f"{noise:.6f}": {k: v for k, v in row.items()}
+                for noise, row in results_by_noise.items()
+            },
+        }
+        with open(out_dir / "results.json", "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+        save_noise_matrix_plots(
+            out_dir=out_dir,
+            case_names=case_names,
+            noise_levels=noise_levels,
+            results_by_noise=results_by_noise,
+            qpos_by_noise_case=qpos_by_noise_case,
+            env=env,
+            metadata=artifacts.metadata,
+        )
+        write_noise_report(
+            out_dir=out_dir,
+            config=config,
+            metadata=artifacts.metadata,
+            noise_levels=noise_levels,
+            case_names=case_names,
+            results_by_noise=results_by_noise,
         )
 
-    costs = {r["case_name"]: np.asarray(r["episode_costs"]) for r in results}
-    comparisons = {
-        "spc_hjV - spc_short": paired_delta_stats(costs["spc_hjV"], costs["spc_short"]),
-        "spc_hjV_grad - spc_short": paired_delta_stats(costs["spc_hjV_grad"], costs["spc_short"]),
-        "spc_hjV_grad - spc_hjV": paired_delta_stats(costs["spc_hjV_grad"], costs["spc_hjV"]),
-    }
-
-    payload = {
-        "config": config.__dict__,
-        "hj_dir": str(args.hj_dir),
-        "cases": case_names,
-        "results": results,
-        "comparisons": comparisons,
-    }
-    with open(out_dir / "results.json", "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-
-    save_plots(out_dir, results, qpos_by_case, env, artifacts.metadata)
-    write_report(out_dir, config, artifacts.metadata, args.hj_dir, results, comparisons)
     print(f"Saved results to {out_dir}", flush=True)
     return 0
 
