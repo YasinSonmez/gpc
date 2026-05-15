@@ -162,18 +162,71 @@ def load_hj_artifacts(hj_dir: Path, config: TrainingConfig, env) -> HJValueArtif
 def perturb_hj_values(
     artifacts: HJValueArtifacts,
     config: TrainingConfig,
-    noise_scale: float,
+    noise_sigma: float,
     noise_seed: int,
+    noise_mean: float,
+    smooth_passes: int,
+    noise_distribution: str,
 ) -> HJValueArtifacts:
-    """Add Gaussian noise to V and recompute grad(V)."""
-    if noise_scale <= 0.0:
-        return artifacts
+    """Apply configured noise model to V and recompute grad(V)."""
+    if noise_mean < 0.0:
+        raise ValueError("noise_mean must be nonnegative")
+    if noise_sigma < 0.0:
+        raise ValueError("noise_sigma must be nonnegative")
+    if noise_distribution not in {
+        "softplus_gaussian",
+        "lognormal",
+        "clipped_gaussian",
+        "blend_correlated",
+    }:
+        raise ValueError(
+            "noise_distribution must be 'softplus_gaussian', 'lognormal', 'clipped_gaussian', or 'blend_correlated'"
+        )
 
     values_np = np.asarray(artifacts.values, dtype=np.float32)
-    value_std = float(np.std(values_np)) + 1e-6
     rng = np.random.default_rng(int(noise_seed))
-    noise = rng.standard_normal(values_np.shape, dtype=np.float32)
-    noisy_values = values_np + float(noise_scale) * value_std * noise
+    eps = np.finfo(np.float32).tiny
+
+    if noise_distribution == "blend_correlated":
+        if noise_sigma > 1.0:
+            raise ValueError("for blend_correlated, noise_sigma must be in [0, 1]")
+        noisy_values = blend_to_correlated_noise(
+            values=values_np,
+            noise_scale=float(noise_sigma),
+            noise_seed=int(noise_seed),
+            smooth_passes=int(smooth_passes),
+        )
+        delta = noisy_values - values_np
+        noise_stat_field = delta
+        noise_model = "Vhat = (1 - lambda) V + lambda N, lambda in [0,1], N smoothed Gaussian"
+    else:
+        if noise_sigma == 0.0:
+            z = np.full(values_np.shape, float(noise_mean), dtype=np.float32)
+        else:
+            z0 = rng.standard_normal(values_np.shape, dtype=np.float32)
+            z0 = smooth_noise_field(z0, smooth_passes=smooth_passes)
+            z0 = (z0 - np.mean(z0)) / (np.std(z0) + 1e-8)
+            if noise_distribution == "softplus_gaussian":
+                z = positive_softplus_gaussian_field(
+                    z0,
+                    mean=float(noise_mean),
+                    small_noise_std=float(noise_sigma),
+                )
+            elif noise_distribution == "lognormal":
+                z = positive_correlated_field_from_normal(
+                    z0,
+                    mean=float(noise_mean),
+                    std=float(noise_sigma),
+                )
+            else:
+                z = float(noise_mean) + float(noise_sigma) * z0
+                z = np.maximum(z, eps).astype(np.float32)
+
+        noisy_values = values_np + z * values_np
+        delta = noisy_values - values_np
+        noise_stat_field = z
+        noise_model = "Vhat = V + z(x) V, z(x) > 0"
+
     noisy_values_jax = jnp.asarray(noisy_values, dtype=jnp.float32)
 
     solver_settings = hj.SolverSettings.with_accuracy(config.hj_solver_accuracy)
@@ -185,8 +238,300 @@ def perturb_hj_values(
         values=noisy_values_jax,
         grad_values=noisy_grad_values,
         policy=artifacts.policy,
-        metadata={**artifacts.metadata, "value_noise_scale": float(noise_scale)},
+        metadata={
+            **artifacts.metadata,
+            "value_noise_model": noise_model,
+            "value_noise_distribution": noise_distribution,
+            "value_noise_mean": float(noise_mean),
+            "value_noise_sigma": float(noise_sigma),
+            "value_noise_smooth_passes": int(smooth_passes),
+            "value_noise_stat_name": "delta" if noise_distribution == "blend_correlated" else "z",
+            "value_noise_min": float(np.min(noise_stat_field)),
+            "value_noise_max": float(np.max(noise_stat_field)),
+            "value_noise_empirical_mean": float(np.mean(noise_stat_field)),
+            "value_noise_empirical_std": float(np.std(noise_stat_field)),
+            "value_noise_q01": float(np.percentile(noise_stat_field, 1.0)),
+            "value_noise_q50": float(np.percentile(noise_stat_field, 50.0)),
+            "value_noise_q99": float(np.percentile(noise_stat_field, 99.0)),
+            "value_delta_abs_mean": float(np.mean(np.abs(delta))),
+            "value_delta_abs_max": float(np.max(np.abs(delta))),
+            "value_delta_rel_l2": float(
+                np.linalg.norm(delta.reshape(-1)) / (np.linalg.norm(values_np.reshape(-1)) + 1e-12)
+            ),
+            "value_correlation": float(np.corrcoef(values_np.reshape(-1), noisy_values.reshape(-1))[0, 1]),
+        },
     )
+
+
+def smooth_noise_field(noise: np.ndarray, smooth_passes: int) -> np.ndarray:
+    """Create a spatially correlated grid field using nearest-neighbor smoothing."""
+    out = np.asarray(noise, dtype=np.float32)
+    for _ in range(max(0, int(smooth_passes))):
+        padded = np.pad(out, [(1, 1)] * out.ndim, mode="edge")
+        center = tuple(slice(1, -1) for _ in range(out.ndim))
+        acc = padded[center].copy()
+        count = 1.0
+        for axis in range(out.ndim):
+            lower = list(center)
+            upper = list(center)
+            lower[axis] = slice(0, -2)
+            upper[axis] = slice(2, None)
+            acc = acc + padded[tuple(lower)] + padded[tuple(upper)]
+            count += 2.0
+        out = acc / count
+    return out.astype(np.float32)
+
+
+def blend_to_correlated_noise(
+    values: np.ndarray,
+    noise_scale: float,
+    noise_seed: int,
+    smooth_passes: int = 4,
+) -> np.ndarray:
+    """Interpolate from data to spatially correlated noise.
+
+    Formula:
+        V_hat(lambda) = (1 - lambda) * V + lambda * N,
+    where lambda in [0, 1], and N is a smoothed Gaussian field rescaled to
+    match mean/std of V.
+
+    This creates a clean path from original data (lambda=0) to complete
+    correlated noise (lambda=1) without heavy-tailed spikes.
+    """
+    if not (0.0 <= noise_scale <= 1.0):
+        raise ValueError("noise_scale must be in [0, 1]")
+
+    values_np = np.asarray(values, dtype=np.float32)
+    rng = np.random.default_rng(int(noise_seed))
+
+    z = rng.standard_normal(values_np.shape, dtype=np.float32)
+    z = smooth_noise_field(z, smooth_passes=smooth_passes)
+    z = (z - np.mean(z)) / (np.std(z) + 1e-8)
+
+    v_mean = float(np.mean(values_np))
+    v_std = float(np.std(values_np))
+    if v_std < 1e-8:
+        noise_field = np.full_like(values_np, v_mean)
+    else:
+        noise_field = v_mean + v_std * z
+
+    lam = float(noise_scale)
+    v_hat = (1.0 - lam) * values_np + lam * noise_field
+    return v_hat.astype(np.float32)
+
+
+def _obstacle_mask_xy(
+    x_vec: np.ndarray,
+    y_vec: np.ndarray,
+    variant: str,
+    obstacle_pos: np.ndarray,
+) -> np.ndarray:
+    """Return boolean mask where True indicates obstacle interior."""
+    x_vec = np.asarray(x_vec, dtype=np.float32)
+    y_vec = np.asarray(y_vec, dtype=np.float32)
+    X, Y = np.meshgrid(x_vec, y_vec, indexing="xy")
+    pts = np.stack([X.reshape(-1), Y.reshape(-1)], axis=-1)
+    obs = jnp.asarray(obstacle_pos, dtype=jnp.float32)
+    sdf = jax.vmap(lambda p: obstacle_signed_distance(jnp.asarray(p), obs, variant))(
+        jnp.asarray(pts, dtype=jnp.float32)
+    )
+    inside = np.asarray(sdf < 0.0).reshape(Y.shape)
+    return inside
+
+
+def _hj_style_limits(masked: np.ndarray) -> tuple[float | None, float | None]:
+    vals = masked[np.isfinite(masked)]
+    if vals.size == 0:
+        return None, None
+    vmin = float(np.percentile(vals, 2.0))
+    vmax = float(np.percentile(vals, 98.0))
+    if vmax <= vmin:
+        vmin = float(np.min(vals))
+        vmax = float(np.max(vals))
+    return vmin, vmax
+
+
+def plot_blend_noise_sweep_hj_style(
+    values: np.ndarray,
+    noise_scales: list[float],
+    noise_seed: int,
+    smooth_passes: int,
+    out_path: Path,
+    variant: str,
+    obstacle_pos: np.ndarray,
+    x_vec: np.ndarray | None = None,
+    y_vec: np.ndarray | None = None,
+    ix_vx: int | None = None,
+    ix_vy: int | None = None,
+) -> None:
+    """Plot a data->noise sweep using the HJ-style obstacle-masked scale.
+
+    All panels share one color range computed from the base free-space values
+    (2-98 percentiles), matching the matrix-plot style used elsewhere.
+    """
+    if len(noise_scales) == 0:
+        raise ValueError("noise_scales must be non-empty")
+
+    values_np = np.asarray(values, dtype=np.float32)
+    if values_np.ndim not in (2, 4):
+        raise ValueError("values must be 2D or 4D")
+
+    if values_np.ndim == 4:
+        if ix_vx is None:
+            ix_vx = values_np.shape[2] // 2
+        if ix_vy is None:
+            ix_vy = values_np.shape[3] // 2
+        base_slice = np.asarray(values_np[:, :, ix_vx, ix_vy]).T
+    else:
+        base_slice = np.asarray(values_np).T
+
+    if x_vec is None:
+        x_vec = np.arange(base_slice.shape[1], dtype=np.float32)
+    if y_vec is None:
+        y_vec = np.arange(base_slice.shape[0], dtype=np.float32)
+    x_vec = np.asarray(x_vec, dtype=np.float32)
+    y_vec = np.asarray(y_vec, dtype=np.float32)
+
+    mask = _obstacle_mask_xy(
+        x_vec=x_vec,
+        y_vec=y_vec,
+        variant=str(variant),
+        obstacle_pos=np.asarray(obstacle_pos, dtype=np.float32),
+    )
+
+    base_masked = np.array(base_slice, copy=True)
+    base_masked[mask] = np.nan
+    vmin, vmax = _hj_style_limits(base_masked)
+    if vmin is None or vmax is None:
+        raise ValueError("could not compute HJ-style limits from free-space cells")
+
+    cmap = plt.get_cmap("magma").copy()
+    cmap.set_bad(color=(1.0, 1.0, 1.0, 0.96))
+    extent = [x_vec[0], x_vec[-1], y_vec[0], y_vec[-1]]
+
+    fig, axes = plt.subplots(
+        1,
+        len(noise_scales),
+        figsize=(4.2 * len(noise_scales), 4.2),
+        sharex=True,
+        sharey=True,
+        constrained_layout=True,
+    )
+    if len(noise_scales) == 1:
+        axes = [axes]
+
+    im_ref = None
+    for ax, scale in zip(axes, noise_scales):
+        v_hat = blend_to_correlated_noise(
+            values=values_np,
+            noise_scale=float(scale),
+            noise_seed=int(noise_seed),
+            smooth_passes=int(smooth_passes),
+        )
+        if values_np.ndim == 4:
+            sl = np.asarray(v_hat[:, :, ix_vx, ix_vy]).T
+        else:
+            sl = np.asarray(v_hat).T
+        sl = np.array(sl, copy=True)
+        sl[mask] = np.nan
+
+        im = ax.imshow(
+            sl,
+            origin="lower",
+            extent=extent,
+            aspect="equal",
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            interpolation="nearest",
+        )
+        if im_ref is None:
+            im_ref = im
+        ax.set_title(f"noise_scale={float(scale):.2f}")
+        ax.set_xlabel("x")
+    axes[0].set_ylabel("y")
+
+    fig.suptitle(
+        "Blend from data to correlated noise (HJ-style shared free-space scale)",
+        y=1.02,
+    )
+    if im_ref is not None:
+        cbar = fig.colorbar(im_ref, ax=axes, fraction=0.03, pad=0.02)
+        cbar.set_label("V_hat")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
+def positive_correlated_field_from_normal(
+    field: np.ndarray,
+    mean: float,
+    std: float,
+) -> np.ndarray:
+    """Map a normalized field to positive values with empirical mean/std.
+
+    We use a normalized lognormal family ``exp(a * field)``. For each ``a``,
+    the field is rescaled to the requested empirical mean, and ``a`` is found by
+    bisection so the empirical standard deviation matches ``std``. This keeps
+    every grid value strictly positive without the zero-mass artifact produced
+    by clipping a Gaussian field.
+    """
+    if mean <= 0.0:
+        raise ValueError("positive lognormal noise requires noise_mean > 0")
+    if std == 0.0:
+        return np.full(field.shape, mean, dtype=np.float32)
+
+    x = np.asarray(field, dtype=np.float64)
+
+    def _make(scale: float) -> np.ndarray:
+        y = np.exp(np.clip(scale * x, -60.0, 60.0))
+        y *= mean / (np.mean(y) + 1e-300)
+        return y
+
+    lo = 0.0
+    hi = 1.0
+    while np.std(_make(hi)) < std and hi < 64.0:
+        hi *= 2.0
+
+    for _ in range(48):
+        mid = 0.5 * (lo + hi)
+        if np.std(_make(mid)) < std:
+            lo = mid
+        else:
+            hi = mid
+
+    return _make(hi).astype(np.float32)
+
+
+def positive_softplus_gaussian_field(
+    field: np.ndarray,
+    mean: float,
+    small_noise_std: float,
+) -> np.ndarray:
+    """Positive Gaussian-like field matching N(mean, std) to first order.
+
+    Let ``a = softplus^{-1}(mean)``. We set
+
+        z = softplus(a + (std / sigmoid(a)) * field).
+
+    Since d softplus(a) / da = sigmoid(a), small ``std`` gives
+    ``z approx mean + std * field`` while preserving strict positivity for all
+    scales. Unlike clipping, this introduces no atom at zero; unlike a
+    fixed-mean high-variance lognormal, large scales do not make most cells
+    collapse to nearly zero.
+    """
+    if mean <= 0.0:
+        raise ValueError("softplus Gaussian noise requires noise_mean > 0")
+    if small_noise_std == 0.0:
+        return np.full(field.shape, mean, dtype=np.float32)
+
+    x = np.asarray(field, dtype=np.float64)
+    a = np.log(np.expm1(mean))
+    slope = 1.0 / (1.0 + np.exp(-a))
+    latent = a + (small_noise_std / (slope + 1e-12)) * x
+    z = np.logaddexp(0.0, latent)
+    return np.maximum(z, np.finfo(np.float32).tiny).astype(np.float32)
 
 
 def make_hj_terminal_value(env, artifacts: HJValueArtifacts):
@@ -200,13 +545,29 @@ def make_hj_terminal_value(env, artifacts: HJValueArtifacts):
     return terminal_value
 
 
-def configure_base(config_path: Path, episodes: int, batch_size: int, seed: int) -> TrainingConfig:
+def configure_base(
+    config_path: Path,
+    episodes: int,
+    batch_size: int,
+    seed: int,
+    controller_type: str | None,
+    plan_horizon: float,
+    num_knots: int,
+    num_samples: int | None,
+    iterations: int | None,
+) -> TrainingConfig:
     config = TrainingConfig.from_yaml(config_path)
     config.task_name = "avoid"
     config.method = "gpc"
     config.seed = int(seed)
-    config.plan_horizon = 0.5
-    config.num_knots = 4
+    if controller_type is not None:
+        config.controller_type = str(controller_type)
+    config.plan_horizon = float(plan_horizon)
+    config.num_knots = int(num_knots)
+    if num_samples is not None:
+        config.num_samples = int(num_samples)
+    if iterations is not None:
+        config.iterations = int(iterations)
     config.hj_eval_episodes = int(episodes)
     config.num_envs = int(batch_size)
     config.num_policy_samples = 0
@@ -215,7 +576,7 @@ def configure_base(config_path: Path, episodes: int, batch_size: int, seed: int)
     config.record_training_videos = False
     config.record_eval_videos = False
     config.proposal_overlay = False
-    config.proposal_video_trace_points = 0
+    config.proposal_video_trace_points = 1
     return config
 
 
@@ -475,6 +836,30 @@ def save_noise_matrix_plots(
     fig.savefig(out_dir / "noise_episode_cost_matrix.png", dpi=200)
     plt.close(fig)
 
+    successes = np.array(
+        [
+            [results_by_noise[n][c]["success_rate"] for c in case_names]
+            for n in noise_levels
+        ],
+        dtype=np.float32,
+    )
+
+    fig, ax = plt.subplots(figsize=(8.0, 5.0))
+    im = ax.imshow(successes, aspect="auto", cmap="viridis", vmin=0.0, vmax=1.0)
+    ax.set_xticks(np.arange(len(case_names)), labels=case_names)
+    ax.set_yticks(np.arange(len(noise_levels)), labels=[f"{n:.4f}" for n in noise_levels])
+    ax.set_xlabel("Case")
+    ax.set_ylabel("Value-noise sigma")
+    ax.set_title(f"Avoid {variant}: success rate by noise and method")
+    for i in range(successes.shape[0]):
+        for j in range(successes.shape[1]):
+            ax.text(j, i, f"{successes[i, j]:.2f}", ha="center", va="center", color="white", fontsize=8)
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Success rate")
+    fig.tight_layout()
+    fig.savefig(out_dir / "noise_success_rate_matrix.png", dpi=200)
+    plt.close(fig)
+
     pointmass_body_id = env.task.mj_model.body("pointmass").id
     offset = np.asarray(env.task.mj_model.body_pos[pointmass_body_id, :2], dtype=np.float32)
     goal = np.asarray(metadata["goal_pos"], dtype=np.float32)
@@ -488,7 +873,9 @@ def save_noise_matrix_plots(
         sharey=True,
     )
     axes = np.asarray(axes)
-    if axes.ndim == 1:
+    if axes.ndim == 0:
+        axes = axes.reshape(1, 1)
+    elif axes.ndim == 1:
         if len(noise_levels) == 1:
             axes = axes[None, :]
         else:
@@ -604,38 +991,119 @@ def write_noise_report(
     noise_levels: list[float],
     case_names: list[str],
     results_by_noise: dict[float, dict[str, dict[str, Any]]],
+    noise_stats_by_noise: dict[float, dict[str, float]],
+    noise_mean: float,
+    noise_seed: int,
+    noise_seed_mode: str,
+    noise_seed_by_noise: dict[float, int],
+    smooth_passes: int,
+    noise_distribution: str,
 ) -> None:
     variant = str(metadata.get("task_variant", config.task_variant))
+    if noise_distribution == "blend_correlated":
+        noise_model_desc = (
+            "Vhat(x) = (1-lambda) V(x) + lambda N(x), with lambda=noise sigma in [0,1] "
+            "and N a spatially correlated Gaussian field matched to mean/std(V)."
+        )
+    else:
+        noise_model_desc = "Vhat(x) = V(x) + z(x)V(x), with positive spatially correlated z(x)."
     lines = [
         f"# Avoid {variant} V-Noise Sensitivity (Exp1 + Exp4)",
         "",
         "## Setup",
         "",
         f"- Short horizon: `plan_horizon={config.plan_horizon}`, `num_knots={config.num_knots}`.",
+        f"- Controller: `{config.controller_type}`, samples `{config.num_samples}`, iterations `{config.iterations}`.",
         f"- Episodes per case: `{config.hj_eval_episodes}`.",
-        "- Rows are increasing noise injected into the HJ value table.",
-        "- Columns are `spc_short`, `spc_hjV`, `spc_hjV_grad`.",
+        f"- Value perturbation: `{noise_model_desc}`",
+        f"- Noise distribution: `{noise_distribution}`.",
+        f"- Noise field base mean parameter: `{noise_mean}`.",
+        f"- Noise sigma parameter sweep: `{noise_levels}`.",
+        f"- Noise seed base: `{noise_seed}`.",
+        f"- Noise seed mode: `{noise_seed_mode}`.",
+        "- The table below reports empirical perturbation statistics actually applied to the HJ grid.",
+        f"- Correlation operator: `{smooth_passes}` nearest-neighbor smoothing passes on the 4D HJ grid.",
+        "- Success: final distance `< 0.05` and no obstacle collision under the existing signed-distance check.",
         "",
         "## Mean Episode Cost Matrix",
         "",
-        "| noise scale | spc_short | spc_hjV | spc_hjV_grad | hjV-short | grad-short | grad-hjV |",
-        "|---:|---:|---:|---:|---:|---:|---:|",
     ]
+    header = "| sigma | " + " | ".join(case_names) + " |"
+    lines.append(header)
+    lines.append("|---:" + "|---:" * len(case_names) + "|")
     for noise in noise_levels:
         row = results_by_noise[noise]
-        short = row["spc_short"]["episode_cost_mean"]
-        hjv = row["spc_hjV"]["episode_cost_mean"]
-        grad = row["spc_hjV_grad"]["episode_cost_mean"]
+        vals = " | ".join(f"{row[c]['episode_cost_mean']:.4f}" for c in case_names)
+        lines.append(f"| {noise:.4f} | {vals} |")
+    lines.extend(
+        [
+            "",
+            "## Success Rate Matrix",
+            "",
+        ]
+    )
+    lines.append(header)
+    lines.append("|---:" + "|---:" * len(case_names) + "|")
+    for noise in noise_levels:
+        row = results_by_noise[noise]
+        vals = " | ".join(f"{row[c]['success_rate']:.3f}" for c in case_names)
+        lines.append(f"| {noise:.4f} | {vals} |")
+    lines.extend(
+        [
+            "",
+            "## Noise Field Checks",
+            "",
+            "| sigma | empirical mean | empirical std | min z | q50 z | q99 z | max z | rel L2 delta | corr(V,Vhat) |",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    lines.extend(
+        [
+            "",
+            "## Noise Seed Mapping",
+            "",
+            "| sigma | noise seed |",
+            "|---:|---:|",
+        ]
+    )
+    for noise in noise_levels:
+        lines.append(f"| {noise:.4f} | {int(noise_seed_by_noise[noise])} |")
+    lines.extend(
+        [
+            "",
+        ]
+    )
+    for noise in noise_levels:
+        stats = noise_stats_by_noise[noise]
         lines.append(
-            f"| {noise:.4f} | {short:.4f} | {hjv:.4f} | {grad:.4f} | {hjv - short:.4f} | {grad - short:.4f} | {grad - hjv:.4f} |"
+            "| {sigma:.4f} | {mean:.6f} | {std:.6f} | {min_z:.6g} | {q50:.6f} | {q99:.6f} | {max_z:.6f} | {rel_l2:.6f} | {corr:.6f} |".format(
+                sigma=noise,
+                mean=stats["empirical_mean"],
+                std=stats["empirical_std"],
+                min_z=stats["min"],
+                q50=stats["q50"],
+                q99=stats["q99"],
+                max_z=stats["max"],
+                rel_l2=stats["value_delta_rel_l2"],
+                corr=stats["value_correlation"],
+            )
         )
     lines.extend(
         [
             "",
+            "## Interpretation",
+            "",
+            "- The perturbation is multiplicative and strictly positive, so it preserves the sign of the HJ value while changing the relative terminal-value scale across the grid.",
+            "- Spatial smoothing makes nearby HJ states receive similar perturbations; this avoids measuring only high-frequency interpolation noise.",
+            "- `spc_short` is independent of `Vhat`; any variation in value-guided cases is attributable to the terminal value and gradient table perturbation under matched episode seeds.",
+            "",
             "## Figures",
             "",
-            "- `noise_episode_cost_matrix.png`: mean-cost heatmap (rows=noise, cols=method).",
-            "- `noise_trajectory_matrix.png`: 5x3 trajectory panel (rows=noise, cols=method).",
+            "![Mean episode cost](noise_episode_cost_matrix.png)",
+            "",
+            "![Success rate](noise_success_rate_matrix.png)",
+            "",
+            "![Trajectory matrix](noise_trajectory_matrix.png)",
         ]
     )
     (out_dir / "noise_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -646,6 +1114,33 @@ def parse_noise_levels(text: str) -> list[float]:
     if not values:
         raise ValueError("noise-level list must be non-empty")
     values = [max(0.0, v) for v in values]
+    return values
+
+
+def resolve_noise_seed(
+    base_seed: int,
+    run_seed: int,
+    sigma_index: int,
+    mode: str,
+) -> int:
+    """Return deterministic noise RNG seed for one (run seed, sigma index)."""
+    if mode == "fixed":
+        return int(base_seed)
+    if mode == "per_sigma":
+        return int(base_seed + 7919 * (sigma_index + 1))
+    if mode == "per_seed_sigma":
+        return int(base_seed + 1000003 * run_seed + 7919 * (sigma_index + 1))
+    raise ValueError(f"unknown noise seed mode: {mode}")
+
+
+def parse_case_names(text: str) -> list[str]:
+    values = [x.strip() for x in text.split(",") if x.strip()]
+    allowed = {"spc_short", "spc_hjV", "spc_hjV_grad"}
+    unknown = sorted(set(values) - allowed)
+    if unknown:
+        raise ValueError(f"unknown case(s): {unknown}; allowed: {sorted(allowed)}")
+    if not values:
+        raise ValueError("case list must be non-empty")
     return values
 
 
@@ -661,22 +1156,62 @@ def main() -> int:
     parser.add_argument("--episodes", type=int, default=64)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--controller-type",
+        type=str,
+        default=None,
+        choices=["predictive_sampling", "uniform", "cem", "cem_no_warm_start", "evosax", "mppi"],
+    )
+    parser.add_argument("--plan-horizon", type=float, default=0.5)
+    parser.add_argument("--num-knots", type=int, default=4)
+    parser.add_argument("--num-samples", type=int, default=None)
+    parser.add_argument("--iterations", type=int, default=None)
+    parser.add_argument("--cases", type=str, default="spc_short,spc_hjV,spc_hjV_grad")
     parser.add_argument("--value-alpha", type=float, default=1.0)
     parser.add_argument("--grad-step", type=float, default=0.25)
     parser.add_argument("--grad-clip-norm", type=float, default=2.0)
     parser.add_argument("--noise-analysis", action="store_true")
-    parser.add_argument("--noise-levels", type=str, default="0.0,0.05,0.1,0.2,0.35")
+    parser.add_argument("--noise-levels", type=str, default="0.001,0.002,0.003,0.004")
+    parser.add_argument("--noise-mean", type=float, default=0.1)
     parser.add_argument("--noise-seed", type=int, default=123)
+    parser.add_argument(
+        "--noise-seed-mode",
+        type=str,
+        default="per_seed_sigma",
+        choices=["fixed", "per_sigma", "per_seed_sigma"],
+        help=(
+            "How to derive HJ-noise RNG seeds across the sigma sweep: "
+            "fixed (same field every sigma), per_sigma (different per sigma), "
+            "per_seed_sigma (different per run seed and sigma)."
+        ),
+    )
+    parser.add_argument("--noise-smooth-passes", type=int, default=4)
+    parser.add_argument(
+        "--noise-distribution",
+        type=str,
+        default="softplus_gaussian",
+        choices=["softplus_gaussian", "lognormal", "clipped_gaussian", "blend_correlated"],
+    )
     args = parser.parse_args()
 
     out_dir = args.out_dir / time.strftime("%Y%m%d_%H%M%S")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    config = configure_base(args.config, args.episodes, args.batch_size, args.seed)
+    config = configure_base(
+        args.config,
+        args.episodes,
+        args.batch_size,
+        args.seed,
+        args.controller_type,
+        args.plan_horizon,
+        args.num_knots,
+        args.num_samples,
+        args.iterations,
+    )
     env = create_environment(config)
     artifacts = load_hj_artifacts(args.hj_dir, config, env)
 
-    case_names = ["spc_short", "spc_hjV", "spc_hjV_grad"]
+    case_names = parse_case_names(args.cases)
     if not args.noise_analysis:
         results: list[dict[str, Any]] = []
         qpos_by_case: dict[str, np.ndarray] = {}
@@ -701,10 +1236,15 @@ def main() -> int:
             )
 
         costs = {r["case_name"]: np.asarray(r["episode_costs"]) for r in results}
+        comparison_pairs = [
+            ("spc_hjV", "spc_short"),
+            ("spc_hjV_grad", "spc_short"),
+            ("spc_hjV_grad", "spc_hjV"),
+        ]
         comparisons = {
-            "spc_hjV - spc_short": paired_delta_stats(costs["spc_hjV"], costs["spc_short"]),
-            "spc_hjV_grad - spc_short": paired_delta_stats(costs["spc_hjV_grad"], costs["spc_short"]),
-            "spc_hjV_grad - spc_hjV": paired_delta_stats(costs["spc_hjV_grad"], costs["spc_hjV"]),
+            f"{a} - {b}": paired_delta_stats(costs[a], costs[b])
+            for a, b in comparison_pairs
+            if a in costs and b in costs
         }
 
         payload = {
@@ -724,30 +1264,61 @@ def main() -> int:
         noise_levels = parse_noise_levels(args.noise_levels)
         results_by_noise: dict[float, dict[str, dict[str, Any]]] = {}
         qpos_by_noise_case: dict[tuple[float, str], np.ndarray] = {}
+        noise_stats_by_noise: dict[float, dict[str, float]] = {}
+        noise_seed_by_noise: dict[float, int] = {}
 
-        print("Running spc_short baseline once ...", flush=True)
-        short_result, short_qpos = evaluate_case(
-            config=config,
-            env=env,
-            artifacts=artifacts,
-            case_name="spc_short",
-            value_alpha=float(args.value_alpha),
-            grad_step=float(args.grad_step),
-            grad_clip_norm=float(args.grad_clip_norm),
-        )
-        for noise in noise_levels:
-            row: dict[str, dict[str, Any]] = {"spc_short": short_result}
+        short_result = None
+        short_qpos = None
+        if "spc_short" in case_names:
+            print("Running spc_short baseline once ...", flush=True)
+            short_result, short_qpos = evaluate_case(
+                config=config,
+                env=env,
+                artifacts=artifacts,
+                case_name="spc_short",
+                value_alpha=float(args.value_alpha),
+                grad_step=float(args.grad_step),
+                grad_clip_norm=float(args.grad_clip_norm),
+            )
+        for noise_idx, noise in enumerate(noise_levels):
+            row: dict[str, dict[str, Any]] = {}
             results_by_noise[noise] = row
-            qpos_by_noise_case[(noise, "spc_short")] = short_qpos
+            if short_result is not None and short_qpos is not None:
+                row["spc_short"] = short_result
+                qpos_by_noise_case[(noise, "spc_short")] = short_qpos
+
+            sigma_noise_seed = resolve_noise_seed(
+                base_seed=int(args.noise_seed),
+                run_seed=int(args.seed),
+                sigma_index=int(noise_idx),
+                mode=str(args.noise_seed_mode),
+            )
+            noise_seed_by_noise[noise] = int(sigma_noise_seed)
 
             noisy_artifacts = perturb_hj_values(
                 artifacts=artifacts,
                 config=config,
-                noise_scale=float(noise),
-                noise_seed=int(args.noise_seed + int(round(1000 * noise))),
+                noise_sigma=float(noise),
+                noise_seed=int(sigma_noise_seed),
+                noise_mean=float(args.noise_mean),
+                smooth_passes=int(args.noise_smooth_passes),
+                noise_distribution=str(args.noise_distribution),
             )
+            noise_stats_by_noise[noise] = {
+                "empirical_mean": float(noisy_artifacts.metadata["value_noise_empirical_mean"]),
+                "empirical_std": float(noisy_artifacts.metadata["value_noise_empirical_std"]),
+                "min": float(noisy_artifacts.metadata["value_noise_min"]),
+                "max": float(noisy_artifacts.metadata["value_noise_max"]),
+                "q01": float(noisy_artifacts.metadata["value_noise_q01"]),
+                "q50": float(noisy_artifacts.metadata["value_noise_q50"]),
+                "q99": float(noisy_artifacts.metadata["value_noise_q99"]),
+                "value_delta_abs_mean": float(noisy_artifacts.metadata["value_delta_abs_mean"]),
+                "value_delta_abs_max": float(noisy_artifacts.metadata["value_delta_abs_max"]),
+                "value_delta_rel_l2": float(noisy_artifacts.metadata["value_delta_rel_l2"]),
+                "value_correlation": float(noisy_artifacts.metadata["value_correlation"]),
+            }
 
-            for case_name in ["spc_hjV", "spc_hjV_grad"]:
+            for case_name in [c for c in case_names if c != "spc_short"]:
                 print(f"Running noise={noise:.4f}, case={case_name} ...", flush=True)
                 result, qpos = evaluate_case(
                     config=config,
@@ -776,6 +1347,16 @@ def main() -> int:
             "hj_dir": str(args.hj_dir),
             "cases": case_names,
             "noise_levels": noise_levels,
+            "noise_seed": int(args.noise_seed),
+            "noise_seed_mode": str(args.noise_seed_mode),
+            "noise_seed_by_noise": {
+                f"{noise:.6f}": int(seed)
+                for noise, seed in noise_seed_by_noise.items()
+            },
+            "noise_stats_by_noise": {
+                f"{noise:.6f}": stats
+                for noise, stats in noise_stats_by_noise.items()
+            },
             "results_by_noise": {
                 f"{noise:.6f}": {k: v for k, v in row.items()}
                 for noise, row in results_by_noise.items()
@@ -800,6 +1381,13 @@ def main() -> int:
             noise_levels=noise_levels,
             case_names=case_names,
             results_by_noise=results_by_noise,
+            noise_stats_by_noise=noise_stats_by_noise,
+            noise_mean=float(args.noise_mean),
+            noise_seed=int(args.noise_seed),
+            noise_seed_mode=str(args.noise_seed_mode),
+            noise_seed_by_noise=noise_seed_by_noise,
+            smooth_passes=int(args.noise_smooth_passes),
+            noise_distribution=str(args.noise_distribution),
         )
 
     print(f"Saved results to {out_dir}", flush=True)
