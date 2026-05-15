@@ -193,6 +193,12 @@ def create_controller(env, config: TrainingConfig):
             chunk_size=config.chunk_size,
             temperature=config.chunk_temperature,
             exploration_floor=config.exploration_floor,
+            resample_pre=config.chunk_resample_pre,
+            resample_post=config.chunk_resample_post,
+            resample_post_last=config.chunk_resample_post_last,
+            resample_scheme=config.chunk_resample_scheme,
+            ess_threshold=config.chunk_ess_threshold,
+            lookahead_alpha=config.chunk_lookahead_alpha,
         )
 
     return PolicyAugmentedController(

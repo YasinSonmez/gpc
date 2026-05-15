@@ -19,7 +19,7 @@ class TrainingConfig:
     terminate_when_unhealthy: bool = False  # Early termination if agent falls (e.g. Ant)
     
     # Controller settings
-    controller_type: str = "predictive_sampling"  # or "evosax", "mppi", "cem"
+    controller_type: str = "predictive_sampling"  # or "uniform", "evosax", "mppi", "cem"
     num_samples: int = 8
     iterations: int = 1  # Number of optimization iterations per control step
     noise_level: float = 0.1
@@ -103,6 +103,16 @@ class TrainingConfig:
     chunked_spc: bool = False
     chunk_size: int = 4
     chunk_temperature: float = 0.1
+    # Resampling schedule: default preserves existing behavior (pre + post).
+    chunk_resample_pre: bool = True
+    chunk_resample_post: bool = True
+    chunk_resample_post_last: bool = True
+    # Resampling scheme: multinomial (default) or low-variance systematic.
+    chunk_resample_scheme: str = "multinomial"  # "multinomial" | "systematic"
+    # ESS threshold as a fraction of N; 0 disables ESS-gated resampling.
+    chunk_ess_threshold: float = 0.0
+    # Optional lookahead score term at chunk boundaries: S + alpha * V_boundary.
+    chunk_lookahead_alpha: float = 0.0
 
     # Value Function Integration
     use_value_function: bool = False
@@ -169,6 +179,14 @@ class TrainingConfig:
                 raise ValueError("chunk_size must be at least 1")
             if self.chunk_temperature <= 0:
                 raise ValueError("chunk_temperature must be positive")
+            if self.chunk_resample_scheme not in ["multinomial", "systematic", "residual_systematic"]:
+                raise ValueError(
+                    "chunk_resample_scheme must be 'multinomial', 'systematic', or 'residual_systematic'"
+                )
+            if not (0.0 <= self.chunk_ess_threshold <= 1.0):
+                raise ValueError("chunk_ess_threshold must be in [0, 1]")
+            if self.chunk_lookahead_alpha < 0.0:
+                raise ValueError("chunk_lookahead_alpha must be nonnegative")
         if self.method not in ["gpc", "hj"]:
             raise ValueError("method must be 'gpc' or 'hj'")
         if self.hj_solver_accuracy not in ["low", "medium", "high", "very_high"]:

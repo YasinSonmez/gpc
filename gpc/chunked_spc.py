@@ -9,7 +9,7 @@ import jax.numpy as jnp
 from hydrax.alg_base import Trajectory
 from mujoco import mjx
 
-from gpc.augmented import PACParams, PolicyAugmentedController
+from gpc.augmented import PACParams, PolicyAugmentedController, ValueAugmentedTask
 
 
 def boltzmann_resample_indices(
@@ -33,6 +33,69 @@ def boltzmann_resample_indices(
     centered = costs - jnp.min(costs)
     logits = -centered / temperature
     return jax.random.categorical(rng, logits, shape=costs.shape)
+
+
+def systematic_resample_indices(rng: jax.Array, probs: jax.Array) -> jax.Array:
+    """Low-variance systematic resampling from categorical probabilities."""
+    num_particles = probs.shape[0]
+    u0 = jax.random.uniform(
+        rng,
+        (),
+        minval=0.0,
+        maxval=1.0 / num_particles,
+    )
+    positions = u0 + jnp.arange(num_particles) / num_particles
+    cdf = jnp.cumsum(probs)
+    indices = jnp.searchsorted(cdf, positions, side="right")
+    return jnp.clip(indices, 0, num_particles - 1)
+
+
+def residual_systematic_resample_indices(
+    rng: jax.Array,
+    probs: jax.Array,
+) -> jax.Array:
+    """Residual resampling with systematic draw on the residual mass."""
+    num_particles = probs.shape[0]
+    expected = probs * num_particles
+    deterministic_counts = jnp.floor(expected).astype(jnp.int32)
+    residual = expected - deterministic_counts.astype(expected.dtype)
+
+    num_deterministic = jnp.sum(deterministic_counts)
+    num_remaining = jnp.maximum(0, num_particles - num_deterministic)
+
+    cumulative_counts = jnp.cumsum(deterministic_counts)
+    positions = jnp.arange(num_particles, dtype=jnp.int32)
+    deterministic_idx = jnp.searchsorted(cumulative_counts, positions, side="right")
+    deterministic_idx = jnp.clip(deterministic_idx, 0, num_particles - 1)
+
+    residual_mass = jnp.sum(residual)
+    residual_probs = residual / jnp.maximum(residual_mass, 1e-12)
+    residual_cdf = jnp.cumsum(residual_probs)
+
+    rng_u, rng_perm = jax.random.split(rng)
+
+    def _sample_u0(_: None) -> jax.Array:
+        return jax.random.uniform(
+            rng_u,
+            (),
+            minval=0.0,
+            maxval=1.0 / num_remaining.astype(jnp.float32),
+        )
+
+    u0 = jax.lax.cond(
+        num_remaining > 0,
+        _sample_u0,
+        lambda _: jnp.array(0.0, dtype=jnp.float32),
+        operand=None,
+    )
+    residual_positions = u0 + jnp.arange(num_particles) / jnp.maximum(num_remaining, 1)
+    residual_idx = jnp.searchsorted(residual_cdf, residual_positions, side="right")
+    residual_idx = jnp.clip(residual_idx, 0, num_particles - 1)
+
+    residual_offsets = jnp.clip(positions - num_deterministic, 0, num_particles - 1)
+    picked_residual = residual_idx[residual_offsets]
+    merged = jnp.where(positions < num_deterministic, deterministic_idx, picked_residual)
+    return jax.random.permutation(rng_perm, merged)
 
 
 class ChunkedPAC(PolicyAugmentedController):
@@ -62,6 +125,12 @@ class ChunkedPAC(PolicyAugmentedController):
         chunk_size: int,
         temperature: float,
         exploration_floor: float = 0.0,
+        resample_pre: bool = True,
+        resample_post: bool = True,
+        resample_post_last: bool = True,
+        resample_scheme: str = "multinomial",
+        ess_threshold: float = 0.0,
+        lookahead_alpha: float = 0.0,
     ) -> None:
         """Initialize the chunked controller.
 
@@ -74,11 +143,28 @@ class ChunkedPAC(PolicyAugmentedController):
             temperature: Positive Boltzmann resampling temperature.
             exploration_floor: Fraction of base samples replaced by wide random
                 proposals, forwarded to ``PolicyAugmentedController``.
+            resample_pre: Resample at the beginning of each interior chunk.
+            resample_post: Resample after each chunk rollout.
+            resample_post_last: If True, also resample after the final chunk.
+            resample_scheme: ``multinomial`` (default), ``systematic``, or
+                ``residual_systematic``.
+            ess_threshold: ESS threshold as a fraction of particle count.
+                If in (0, 1], resampling is skipped when ESS is above threshold.
+            lookahead_alpha: Weight for boundary lookahead score in resampling:
+                score = cumulative_cost + lookahead_alpha * terminal_cost(boundary_state).
         """
         if chunk_size < 1:
             raise ValueError("chunk_size must be at least 1")
         if temperature <= 0:
             raise ValueError("temperature must be positive")
+        if resample_scheme not in {"multinomial", "systematic", "residual_systematic"}:
+            raise ValueError(
+                "resample_scheme must be 'multinomial', 'systematic', or 'residual_systematic'"
+            )
+        if not (0.0 <= ess_threshold <= 1.0):
+            raise ValueError("ess_threshold must be in [0, 1]")
+        if lookahead_alpha < 0.0:
+            raise ValueError("lookahead_alpha must be nonnegative")
 
         super().__init__(
             base_ctrl,
@@ -90,6 +176,12 @@ class ChunkedPAC(PolicyAugmentedController):
         self.num_particles = (
             self.num_policy_samples + self.base_ctrl.num_samples
         )
+        self.resample_pre = bool(resample_pre)
+        self.resample_post = bool(resample_post)
+        self.resample_post_last = bool(resample_post_last)
+        self.resample_scheme = str(resample_scheme)
+        self.ess_threshold = float(ess_threshold)
+        self.lookahead_alpha = float(lookahead_alpha)
 
         self.num_chunks = max(
             1,
@@ -98,7 +190,7 @@ class ChunkedPAC(PolicyAugmentedController):
         self._control_slices = _make_slices(self.ctrl_steps, self.num_chunks)
         self._knot_slices = _make_slices(self.num_knots, self.num_chunks)
 
-    def optimize(
+    def _optimize_chunked_impl(
         self, state: mjx.Data, params: PACParams
     ) -> Tuple[PACParams, Trajectory]:
         """Run chunked Boltzmann SPC and update controller parameters."""
@@ -129,6 +221,31 @@ class ChunkedPAC(PolicyAugmentedController):
         )
         rollouts_final = jax.tree.map(lambda x: x[-1], rollouts)
         return params, rollouts_final
+
+    def optimize(
+        self, state: mjx.Data, params: PACParams
+    ) -> Tuple[PACParams, Trajectory]:
+        """Run chunked SPC, optionally with value-augmented terminal cost."""
+        if self.value_fn is None:
+            return self._optimize_chunked_impl(state, params)
+
+        v_fn = lambda data: self.value_fn(params.value_params, data)
+        va_task = ValueAugmentedTask(
+            self.base_ctrl.task,
+            v_fn,
+            params.value_alpha,
+            use_base_terminal_cost=self.use_task_terminal_cost,
+        )
+
+        old_base_task = self.base_ctrl.task
+        old_chunk_task = self.task
+        self.base_ctrl.task = va_task
+        self.task = va_task
+        try:
+            return self._optimize_chunked_impl(state, params)
+        finally:
+            self.base_ctrl.task = old_base_task
+            self.task = old_chunk_task
 
     def _chunked_rollout(
         self,
@@ -163,10 +280,12 @@ class ChunkedPAC(PolicyAugmentedController):
         for chunk_idx, ((c0, c1), (k0, k1)) in enumerate(
             zip(self._control_slices, self._knot_slices, strict=True)
         ):
-            if chunk_idx > 0:
+            if chunk_idx > 0 and self.resample_pre:
                 rng, parent_rng = jax.random.split(rng)
                 parent_idx = self._resample_indices(
-                    parent_rng, cumulative_domain_costs
+                    parent_rng,
+                    cumulative_domain_costs,
+                    particle_states,
                 )
                 particle_states = _take_particles(particle_states, parent_idx)
                 controls = controls[parent_idx]
@@ -195,16 +314,22 @@ class ChunkedPAC(PolicyAugmentedController):
             domain_costs = domain_costs.at[:, :, c0:c1].set(segment_costs)
             trace_sites = trace_sites.at[:, c0:c1].set(segment_traces[0])
 
-            rng, child_rng = jax.random.split(rng)
-            child_idx = self._resample_indices(
-                child_rng, cumulative_domain_costs
+            do_post_resample = self.resample_post and (
+                self.resample_post_last or (chunk_idx < self.num_chunks - 1)
             )
-            particle_states = _take_particles(particle_states, child_idx)
-            controls = controls[child_idx]
-            knots = knots[child_idx]
-            domain_costs = domain_costs[:, child_idx]
-            trace_sites = trace_sites[child_idx]
-            cumulative_domain_costs = cumulative_domain_costs[:, child_idx]
+            if do_post_resample:
+                rng, child_rng = jax.random.split(rng)
+                child_idx = self._resample_indices(
+                    child_rng,
+                    cumulative_domain_costs,
+                    particle_states,
+                )
+                particle_states = _take_particles(particle_states, child_idx)
+                controls = controls[child_idx]
+                knots = knots[child_idx]
+                domain_costs = domain_costs[:, child_idx]
+                trace_sites = trace_sites[child_idx]
+                cumulative_domain_costs = cumulative_domain_costs[:, child_idx]
 
         terminal_costs = jax.vmap(jax.vmap(self.task.terminal_cost))(
             particle_states
@@ -291,14 +416,52 @@ class ChunkedPAC(PolicyAugmentedController):
         return final_state, costs, traces
 
     def _resample_indices(
-        self, rng: jax.Array, cumulative_domain_costs: jax.Array
+        self,
+        rng: jax.Array,
+        cumulative_domain_costs: jax.Array,
+        particle_states: mjx.Data,
     ) -> jax.Array:
-        """Resample particles using risk-aggregated cumulative cost."""
-        cumulative_costs = self.risk_strategy.combine_costs(
-            cumulative_domain_costs[:, :, None]
+        """Resample particles using risk-aggregated cumulative + lookahead score."""
+        scores_by_domain = cumulative_domain_costs
+        if self.lookahead_alpha > 0.0:
+            boundary_values = jax.vmap(jax.vmap(self.task.terminal_cost))(
+                particle_states
+            )
+            scores_by_domain = (
+                scores_by_domain + self.lookahead_alpha * boundary_values
+            )
+
+        scores = self.risk_strategy.combine_costs(
+            scores_by_domain[:, :, None]
         )[:, 0]
-        return boltzmann_resample_indices(
-            rng, cumulative_costs, self.temperature
+        centered = scores - jnp.min(scores)
+        logits = -centered / self.temperature
+        probs = jax.nn.softmax(logits)
+
+        should_resample = True
+        if self.ess_threshold > 0.0:
+            ess = 1.0 / jnp.sum(jnp.square(probs))
+            should_resample = ess < (self.ess_threshold * self.num_particles)
+
+        resampled = self._sample_indices_from_probs(rng, probs)
+        identity = jnp.arange(self.num_particles, dtype=resampled.dtype)
+        return jax.lax.select(should_resample, resampled, identity)
+
+    def _sample_indices_from_probs(
+        self,
+        rng: jax.Array,
+        probs: jax.Array,
+    ) -> jax.Array:
+        """Sample particle ancestor indices from categorical probabilities."""
+        if self.resample_scheme == "residual_systematic":
+            return residual_systematic_resample_indices(rng, probs)
+        if self.resample_scheme == "systematic":
+            return systematic_resample_indices(rng, probs)
+        logits = jnp.log(jnp.clip(probs, a_min=1e-12))
+        return jax.random.categorical(
+            rng,
+            logits,
+            shape=(self.num_particles,),
         )
 
 

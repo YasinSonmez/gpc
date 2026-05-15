@@ -1,0 +1,6 @@
+chunk_resample_pre: false
+chunk_resample_post: true
+chunk_resample_post_last: false
+chunk_resample_scheme: systematic
+chunk_ess_threshold: 0.6
+chunk_lookahead_alpha: 0.0
