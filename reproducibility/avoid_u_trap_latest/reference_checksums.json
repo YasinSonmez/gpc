@@ -1,0 +1,26 @@
+{
+  "base_hj": {
+    "source_dir": "experiments/avoid/hj_avoid_binary_u_trap_20260502_131354/hj",
+    "value_function_sha256": "abf8f40edf2321b353e992847749e422a4979c6e66feee4cdcfb551fc6e55b1f",
+    "grid_coordinates_sha256": "34e3b648e3b88f1d05682ef61d4eb995d61ec4a88462da63e2afa3ddaabd7f92",
+    "metadata_sha256": "2b069fca35e3032331584c8a2891365a33d85cc1bca2dfb042ae39aecf60442d"
+  },
+  "noise_levels_used_in_final_matrix": {
+    "0.0": {
+      "seed": 0,
+      "value_function_sha256": "abf8f40edf2321b353e992847749e422a4979c6e66feee4cdcfb551fc6e55b1f"
+    },
+    "0.05": {
+      "seed": 1123,
+      "value_function_sha256": "132362622d1a20f65f82b6614cf6af5644fd8c3aca1d6f52e209b73d0bfc4c0d"
+    },
+    "0.1": {
+      "seed": 2123,
+      "value_function_sha256": "1a3e2665c156dba1fdd5513031595023d322b4d97f5ca8721d561123f10b21ad"
+    },
+    "0.2": {
+      "seed": 3123,
+      "value_function_sha256": "33a25af9abd26267b64eb8a9c6197d8307b124dd3cdf2606349c220a0cac052c"
+    }
+  }
+}
