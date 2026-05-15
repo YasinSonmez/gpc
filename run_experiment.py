@@ -44,6 +44,7 @@ from gpc.envs import (
 )
 from gpc.experiment import ExperimentManager
 from gpc.hj_solver import solve_avoid_hj_binary
+from gpc.sampling import CEMNoWarmStart, UniformRandomShooting
 from gpc.sweep import expand_config_sweep, print_sweep_summary
 from gpc.testing import test_and_record, test_interactive
 from gpc.train_config import evaluate_hj_policy_with_spc, train_with_config
@@ -115,8 +116,23 @@ def create_controller(env, config: TrainingConfig):
             noise_level=config.noise_level,
             **common_params,
         )
+    elif config.controller_type == "uniform":
+        base_ctrl = UniformRandomShooting(
+            env.task,
+            num_samples=config.num_samples,
+            **common_params,
+        )
     elif config.controller_type == "cem":
         base_ctrl = CEM(
+            env.task,
+            num_samples=config.num_samples,
+            num_elites=getattr(config, "num_elites", config.num_samples // 4),
+            sigma_start=getattr(config, "sigma_start", 1.0),
+            sigma_min=getattr(config, "sigma_min", 0.01),
+            **common_params,
+        )
+    elif config.controller_type == "cem_no_warm_start":
+        base_ctrl = CEMNoWarmStart(
             env.task,
             num_samples=config.num_samples,
             num_elites=getattr(config, "num_elites", config.num_samples // 4),

@@ -1,12 +1,111 @@
-from typing import Any, Callable, Tuple
+from typing import Any, Callable, Literal, Tuple
 
 import jax
 import jax.numpy as jnp
-from hydrax.alg_base import Trajectory
+from hydrax.alg_base import SamplingBasedController, SamplingParams, Trajectory
+from hydrax.algs.cem import CEM, CEMParams
 from hydrax.algs.predictive_sampling import PredictiveSampling
+from hydrax.risk import RiskStrategy
+from hydrax.task_base import Task
 from mujoco import mjx
 
 from gpc.policy import Policy
+
+
+class UniformRandomShooting(SamplingBasedController):
+    """Random-shooting MPC with knots sampled uniformly from action bounds."""
+
+    def __init__(
+        self,
+        task: Task,
+        num_samples: int,
+        num_randomizations: int = 1,
+        risk_strategy: RiskStrategy = None,
+        seed: int = 0,
+        plan_horizon: float = 1.0,
+        spline_type: Literal["zero", "linear", "cubic"] = "zero",
+        num_knots: int = 4,
+        iterations: int = 1,
+    ) -> None:
+        super().__init__(
+            task,
+            num_randomizations=num_randomizations,
+            risk_strategy=risk_strategy,
+            seed=seed,
+            plan_horizon=plan_horizon,
+            spline_type=spline_type,
+            num_knots=num_knots,
+            iterations=iterations,
+        )
+        self.num_samples = int(num_samples)
+
+    def init_params(
+        self, initial_knots: jax.Array = None, seed: int = 0
+    ) -> SamplingParams:
+        return super().init_params(initial_knots, seed)
+
+    def sample_knots(
+        self, params: SamplingParams
+    ) -> Tuple[jax.Array, SamplingParams]:
+        rng, sample_rng = jax.random.split(params.rng)
+        knots = jax.random.uniform(
+            sample_rng,
+            (self.num_samples, self.num_knots, self.task.model.nu),
+            minval=self.task.u_min,
+            maxval=self.task.u_max,
+        )
+        return knots, params.replace(rng=rng)
+
+    def update_params(
+        self, params: SamplingParams, rollouts: Trajectory
+    ) -> SamplingParams:
+        costs = jnp.sum(rollouts.costs, axis=1)
+        best_idx = jnp.argmin(costs)
+        return params.replace(mean=rollouts.knots[best_idx])
+
+
+class CEMNoWarmStart(CEM):
+    """CEM variant that disables temporal warm-start across MPC steps.
+
+    Standard Hydrax CEM advances previous optimal knots to initialize the next
+    control step. This variant instead resets mean/cov every control step.
+    """
+
+    def optimize(
+        self,
+        state: mjx.Data,
+        params: CEMParams,
+    ) -> Tuple[CEMParams, Trajectory]:
+        """Perform one CEM optimization step without knot warm-start."""
+        new_tk = jnp.linspace(0.0, self.plan_horizon, self.num_knots) + state.time
+        params = params.replace(
+            tk=new_tk,
+            mean=jnp.zeros_like(params.mean),
+            cov=jnp.full_like(params.cov, self.sigma_start),
+        )
+
+        def _optimize_scan_body(scan_params: CEMParams, _: jax.Array):
+            knots, scan_params = self.sample_knots(scan_params)
+            knots = jnp.clip(knots, self.task.u_min, self.task.u_max)
+
+            rng, dr_rng = jax.random.split(scan_params.rng)
+            rollouts = self.rollout_with_randomizations(
+                state,
+                new_tk,
+                knots,
+                dr_rng,
+            )
+            scan_params = scan_params.replace(rng=rng)
+            scan_params = self.update_params(scan_params, rollouts)
+            return scan_params, rollouts
+
+        params, rollouts = jax.lax.scan(
+            f=_optimize_scan_body,
+            init=params,
+            xs=jnp.arange(self.iterations),
+        )
+        rollouts_final = jax.tree.map(lambda x: x[-1], rollouts)
+        return params, rollouts_final
 
 
 class BootstrappedPredictiveSampling(PredictiveSampling):

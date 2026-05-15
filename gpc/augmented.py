@@ -252,6 +252,34 @@ class PolicyAugmentedController(SamplingBasedController):
             prev_elites=prev_elites,
         )
 
+    def _can_delegate_base_optimize(self) -> bool:
+        """Whether PAC sampling logic is inactive and base optimize can be used.
+
+        When there are no policy samples and no PAC-specific resampling features,
+        delegating to ``base_ctrl.optimize`` preserves the exact base-controller
+        behavior (including warm-start variants like CEMNoWarmStart).
+        """
+        return (
+            self.num_policy_samples == 0
+            and (not self.use_colored_noise)
+            and self.num_shift_elites == 0
+            and self.n_wide == 0
+        )
+
+    def _optimize_with_base(
+        self,
+        state: mjx.Data,
+        params: PACParams,
+    ) -> Tuple[PACParams, Trajectory]:
+        """Run optimize through the base controller and map back into PAC params."""
+        base_params, rollouts = self.base_ctrl.optimize(state, params.base_params)
+        params = params.replace(
+            tk=base_params.tk,
+            mean=base_params.mean,
+            base_params=base_params,
+        )
+        return params, rollouts
+
     def optimize(self, state: mjx.Data, params: PACParams) -> Tuple[PACParams, Trajectory]:
         """Perform SPC optimization, potentially with a terminal value function."""
         if self.value_fn is not None:
@@ -271,10 +299,11 @@ class PolicyAugmentedController(SamplingBasedController):
             self.task = va_task
             
             try:
-                # Call base optimize (which calls sample_knots, rollout, update_params)
-                # Note: SamplingBasedController.optimize is likely implemented in hydrax
-                # We expect PAC to inherit it.
-                new_params, rollouts = super().optimize(state, params)
+                if self._can_delegate_base_optimize():
+                    new_params, rollouts = self._optimize_with_base(state, params)
+                else:
+                    # Fall back to PAC's sampling pipeline when policy/PAC augmentation is active.
+                    new_params, rollouts = super().optimize(state, params)
             finally:
                 # Restore tasks
                 self.base_ctrl.task = old_base_task
@@ -282,6 +311,8 @@ class PolicyAugmentedController(SamplingBasedController):
                 
             return new_params, rollouts
         else:
+            if self._can_delegate_base_optimize():
+                return self._optimize_with_base(state, params)
             return super().optimize(state, params)
 
     def get_action(self, params: PACParams, t: float) -> jax.Array:
