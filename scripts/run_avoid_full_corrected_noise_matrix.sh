@@ -49,9 +49,9 @@ for label in "${NOISE_LABELS[@]}"; do
     --chunk-sizes "$CHUNK_SIZES" \
     --taus "$TAUS" \
     --strategy-profiles "$STRATEGY_PROFILES" \
-    --chunk-resample-pre=false \
-    --chunk-resample-post=true \
-    --chunk-resample-post-last=false \
+    --no-chunk-resample-pre \
+    --chunk-resample-post \
+    --no-chunk-resample-post-last \
     --hj-dir "$hj_dir" \
     --value-alpha "$VALUE_ALPHA" \
     --hj-use-base-terminal \
